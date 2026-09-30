@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Digitize Patch — Config Builder</title>
+<style>
+  :root { --bg:#1e1e2e; --fg:#e8e8f0; --accent:#8ab4ff; --panel:#2a2a3c; --bord:#3a3a50; }
+  body { font-family: system-ui, sans-serif; background:var(--bg); color:var(--fg); margin:0; padding:20px; }
+  h1 { font-size:1.2rem; }
+  .panel { background:var(--panel); border:1px solid var(--bord); border-radius:8px; padding:14px; margin-bottom:14px; }
+  label { display:block; margin:8px 0 2px; font-size:.85rem; color:#bbb; }
+  input, select, textarea { width:100%; box-sizing:border-box; background:#1a1a2a; color:var(--fg);
+    border:1px solid var(--bord); border-radius:5px; padding:6px 8px; font-size:.9rem; }
+  textarea { font-family:monospace; min-height:70px; }
+  .row { display:flex; gap:8px; align-items:center; }
+  .row > * { flex:1; }
+  .row button { flex:0 0 auto; }
+  button { background:var(--accent); color:#111; border:none; border-radius:5px; padding:7px 12px;
+    cursor:pointer; font-weight:600; font-size:.85rem; }
+  button:hover { filter:brightness(1.1); }
+  button.ghost { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+  .color-item { display:flex; gap:8px; align-items:center; padding:6px 8px; background:#1a1a2a; border:1px solid var(--bord); border-radius:5px; margin-bottom:6px; }
+  .swatch { width:22px; height:22px; border-radius:4px; border:1px solid #000; flex:0 0 auto; }
+  .color-item .hex { flex:0 0 90px; font-family:monospace; }
+  .color-item .move { flex:0 0 auto; }
+  .color-item input[type=number] { width:70px; flex:0 0 auto; }
+  .color-item .skip { flex:0 0 auto; display:flex; align-items:center; gap:4px; }
+  .color-item .skip input { width:auto; }
+  pre { background:#11111f; padding:12px; border-radius:6px; overflow:auto; font-size:.8rem; }
+  .actions { display:flex; gap:8px; flex-wrap:wrap; }
+  .hint { font-size:.78rem; color:#888; }
+</style>
+</head>
+<body>
+<h1>Digitize Patch — Config Builder</h1>
+
+<div class="panel">
+  <label>Source image filename (for the run command)</label>
+  <input id="imagename" value="Bomb_patch.webp">
+</div>
+
+<div class="panel">
+  <label>Colors (paste one hex per line), or <b>load</b> a posterized PNG / generated SVG:</label>
+  <textarea id="rawcolors" placeholder="#e3e4e9&#10;#d3d3d8&#10;#0b0806"></textarea>
+  <div class="row" style="margin-top:8px;">
+    <input type="file" id="filepicker" accept=".png,.svg,.jpg,.webp">
+  </div>
+  <div class="hint" style="margin-top:6px;">Stitch order = top of list is stitched first (bottom). Use ▲/▼ to move colors — dark colors toward the bottom (stitched last).</div>
+  <div id="colorlist" style="margin-top:10px;"></div>
+</div>
+
+<div class="panel">
+  <label>Border mode</label>
+  <select id="borderMode">
+    <option value="auto" selected>auto (detect ring, black fallback)</option>
+    <option value="off">off (no border)</option>
+    <option value="force_black">force_black</option>
+  </select>
+  <label>Border thickness (mm)</label>
+  <input id="borderThick" type="number" step="0.1" value="2.5">
+</div>
+
+<div class="panel">
+  <div class="row">
+    <div>
+      <label>Trim (auto-cut)</label>
+      <select id="trimEnabled"><option value="false" selected>off</option><option value="true">on</option></select>
+    </div>
+    <div>
+      <label>Cut when jump &gt; (mm)</label>
+      <input id="trimThresh" type="number" step="0.5" value="5.0">
+    </div>
+  </div>
+</div>
+
+<div class="panel actions">
+  <button onclick="renderYaml()">Preview YAML</button>
+  <button class="ghost" onclick="copyYaml()">Copy YAML</button>
+  <button class="ghost" onclick="downloadYaml()">Download .yaml</button>
+  <button class="ghost" onclick="copyCommand()">Copy command</button>
+</div>
+
+<pre id="output">Click "Preview YAML".</pre>
+
+<script>
+const state = { colors: [] }; // {hex, density, skip}
+
+function hexOk(s) { return /^#?[0-9a-fA-F]{6}$/.test(s.trim()); }
+function normHex(s) { s = s.trim(); return s.startsWith('#') ? s.toLowerCase() : '#'+s.toLowerCase(); }
+
+function addColors(hexes) {
+  for (const h of hexes) {
+    const nh = normHex(h);
+    if (!state.colors.find(c => c.hex === nh)) state.colors.push({ hex: nh, density: null, skip: false });
+  }
+  render();
+}
+
+function parseText() {
+  const lines = document.getElementById('rawcolors').value.split(/\s+/).filter(Boolean);
+  addColors(lines.filter(hexOk));
+}
+
+function render() {
+  const ul = document.getElementById('colorlist');
+  ul.innerHTML = '';
+  state.colors.forEach((c, i) => {
+    const div = document.createElement('div');
+    div.className = 'color-item';
+    div.innerHTML = `
+      <span class="swatch" style="background:${c.hex}"></span>
+      <span class="hex">${c.hex}</span>
+      <span class="hint" style="flex:1">density</span>
+      <input type="number" step="0.05" min="0.1" placeholder="0.5" value="${c.density ?? ''}" onchange="state.colors[${i}].density = (this.value===''?null:parseFloat(this.value))">
+      <label class="skip"><input type="checkbox" ${c.skip?'checked':''} onchange="state.colors[${i}].skip = this.checked"> skip</label>
+      <button class="move ghost" onclick="move(${i},-1)">▲</button>
+      <button class="move ghost" onclick="move(${i},1)">▼</button>
+      <button class="move ghost" onclick="state.colors.splice(${i},1); render()">✕</button>`;
+    ul.appendChild(div);
+  });
+}
+
+function move(i, d) {
+  const j = i + d;
+  if (j < 0 || j >= state.colors.length) return;
+  const t = state.colors[i]; state.colors[i] = state.colors[j]; state.colors[j] = t;
+  render();
+}
+
+function buildYaml() {
+  const name = (document.getElementById('imagename').value || 'image').replace(/\.[^.]+$/, '');
+  const L = [];
+  L.push(`# ${name}.yaml`);
+  L.push('order:');
+  for (const c of state.colors.filter(c => !c.skip)) L.push(`  - "${c.hex}"`);
+  const skip = state.colors.filter(c => c.skip).map(c => c.hex);
+  L.push('skip_colors:');
+  if (skip.length) skip.forEach(h => L.push(`  - "${h}"`)); else L.push('  []');
+  L.push('density:');
+  const dens = state.colors.filter(c => c.density != null && !c.skip);
+  if (dens.length) dens.forEach(c => L.push(`  "${c.hex}": ${c.density}`)); else L.push('  {}');
+  L.push('border:');
+  L.push(`  mode: ${document.getElementById('borderMode').value}`);
+  L.push(`  thickness_mm: ${document.getElementById('borderThick').value}`);
+  L.push('trim:');
+  L.push(`  enabled: ${document.getElementById('trimEnabled').value}`);
+  L.push(`  threshold_mm: ${document.getElementById('trimThresh').value}`);
+  return L.join('\n') + '\n';
+}
+
+function renderYaml() { document.getElementById('output').textContent = buildYaml(); }
+
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); return true; } catch (e) { return false; }
+}
+
+function copyYaml() {
+  const y = buildYaml();
+  copyText(y).then(ok => alert(ok ? 'Copied YAML' : 'Clipboard blocked — use Copy manually'));
+  document.getElementById('output').textContent = y;
+}
+
+function downloadYaml() {
+  const name = (document.getElementById('imagename').value || 'image').replace(/\.[^.]+$/, '');
+  const blob = new Blob([buildYaml()], {type:'text/yaml'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name + '.yaml'; a.click();
+}
+
+function copyCommand() {
+  const img = document.getElementById('imagename').value || 'image.webp';
+  const name = img.replace(/\.[^.]+$/, '');
+  const cmd = `tools/digitize/run.sh --config ${name}.yaml ${img}`;
+  copyText(cmd).then(ok => alert(ok ? 'Copied command' : cmd));
+}
+
+document.getElementById('filepicker').addEventListener('change', e => {
+  const f = e.target.files[0]; if (!f) return;
+  const r = new FileReader();
+  r.onload = () => {
+    const text = r.result;
+    const hexes = Array.from(new Set((text.match(/#[0-9a-fA-F]{6}/g) || []))).slice(0, 40);
+    addColors(hexes);
+    document.getElementById('imagename').value = f.name;
+  };
+  if (/\.(svg)$/i.test(f.name)) r.readAsText(f); else r.readAsBinaryString(f);
+});
+
+parseText();
+</script>
+</body>
+</html>

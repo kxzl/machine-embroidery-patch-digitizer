@@ -1,0 +1,17 @@
+# environments
+.venv/
+.venv311/
+
+# vendored Ink/Stitch checkout
+inkstitch/
+
+# generated pipeline artifacts
+work/
+*.webp
+*.jpg
+*.jpeg
+*.png
+*.vp3
+*.zip
+*.err
+*.svg
