@@ -27,8 +27,9 @@ image → color separation → vectorize (fills + satin border) → SVG → Ink/
 # one-shot: image → svg + vp3
 tools/digitize/run.sh path/to/image.webp
 
-# common options
-tools/digitize/run.sh --trim --border-mm 2.5 path/to/patch.webp
+# common options (trim + satin outlines are on by default)
+tools/digitize/run.sh --border-mm 2.5 path/to/patch.webp
+tools/digitize/run.sh --density 0.35 --colors 8 path/to/image.webp
 ```
 
 Output lands in `work/` alongside the repo.
@@ -69,7 +70,11 @@ put on `PYTHONPATH` automatically by `run.sh` and `vectorize.py` usage below.
 | `--colors N` | `5` | Number of posterized thread colors (k-means). Raise for more shading detail, lower for cleaner/bolder patches. |
 | `--border-mm W` | `2.5` | Satin border width (mm). Only applies to transparent-background images. |
 | `--no-border` | off | Don't add the satin border. |
-| `--trim` | off | Add a **TRIM** command after every object → machine auto-cuts between elements instead of leaving jump stitches. |
+| `--density MM` | `0.4` | Default fill row spacing (mm). Keep in `0.3–0.6`; below breaks needles, above leaves gaps. |
+| `--no-satin-outlines` | off | Keep the darkest colour entirely as fill instead of turning thin linework into satin. |
+| `--satin-max-mm W` | `2.5` | Regions of the outline colour thicker than this stay fills (not outlines). |
+| `--no-trim` | off | Trimming is **on by default**; this disables it. |
+| `--trim-mm N` | `5.0` | Cut when a jump is longer than this (mm); `0` = after every object. |
 | (positional) input | — | Path to the source image (`.webp`/`.png`/`.jpg`). |
 | (positional) output | `work/design.svg` | Output SVG path. |
 
@@ -95,8 +100,10 @@ These live at the top of `tools/digitize/vectorize.py` and are not CLI flags
 | Constant | Default | Meaning |
 |---|---|---|
 | `SIZE_MM` | `100` | Longest side of the finished design (mm). |
-| `ROW_SPACING_MM` | `0.5` | Fill line spacing (density). Higher = lighter/softer. Guideline: 0.4 mm standard, raise to 0.5–0.6 mm for large/layered designs to avoid fabric ripping. |
-| `LINEWORK_ROW_SPACING_MM` | `0.6` | Density of the linework stand-in fill (opaque engraving images only). Treated lighter because thin linework re-traced to satin later. |
+| `ROW_SPACING_MM` | `0.4` | Fill line spacing (density). `0.35–0.45` is the safe band for 40 wt thread: `<0.3` packs the needle and breaks it, `>0.6` leaves the fabric showing through. A warning is printed outside `0.3–0.6`. |
+| `SATIN_MIN_MM` | `0.6` | Thinner outline runs are widened to at least this (satin below ~0.6 mm is unreliable). |
+| `SATIN_MAX_MM` | `2.5` | Outline-colour regions thicker than this are kept as fills, not satin. |
+| `SATIN_MIN_LEN_MM` | `1.0` | Drop outline runs shorter than this (removes specks). |
 | `MIN_COMP_MM2` | `0.8` | Drop filled components smaller than this (mm²). Anything sub-mm can't be stitched cleanly. |
 | `MIN_HOLE_MM2` | `0.2` | Fill in holes smaller than this (removes unstitchable specks). |
 | `OPEN_RADIUS` / `CLOSE_RADIUS` | `1` / `2` | Morphological cleanup (px) to remove specks/spurs and close tiny gaps. |
@@ -110,28 +117,40 @@ These live at the top of `tools/digitize/vectorize.py` and are not CLI flags
    - *Transparent background* → patch: uses the alpha channel as the silhouette,
      detects the dark outer ring as the **satin border**, and fills the interior.
    - *Opaque* → flat art: drops the lightest cluster (paper) and treats the
-     darkest cluster as **linework** on its own top layer.
+     darkest cluster as **outlines** on its own top layer.
 2. **Denoise + posterize**: median filter, then k-means to `--colors` flat colors.
 3. **Vectorize**: each color becomes closed `fill` regions with holes preserved
    (`fill-rule="evenodd"`); sub-mm components/holes are dropped.
-4. **Emit Ink/Stitch SVG** with per-object params: `row_spacing_mm` (density),
-   `trim_after` (if `--trim`), and `satin_column` for the border.
-5. **Export** via Ink/Stitch headless CLI to `.vp3`.
+4. **Outlines → satin**: the darkest colour's *thin* regions (thinner than
+   `--satin-max-mm`) are skeletonized into centerlines and emitted as simple
+   satin columns whose width follows the local line thickness; its solid regions
+   stay fills.
+5. **Order for travel**: the needle position is carried across colour layers and
+   components (nearest-neighbour), so the sequence is globally short, not just
+   short within one colour.
+6. **Trim**: a jump is cut when it is longer than `--trim-mm` **or** when it is
+   not hidden under a later-stitched layer (an exposed jump thread).
+7. **Emit Ink/Stitch SVG** with per-object params: `row_spacing_mm` (density),
+   `trim_after`, and `satin_column` for outlines and border.
+8. **Export** via Ink/Stitch headless CLI to `.vp3`.
 
-Stitch order: fills (bottom) → linework (middle, opaque images) → satin border (top).
+Stitch order: fills (bottom, light→dark) → satin outlines → satin border (top).
 
 ---
 
 ## Notes & known caveats
 
-- **Linework (engraving-type images) is auto-filled, not satin.** Converting that
-  connected linework to proper satin/centerlines is a manual step (Inkscape +
-  Ink/Stitch stroke→satin) you can do after reviewing the SVG.
+- **Outlines are auto-converted to satin** (skeleton centerline + local width) for
+  the darkest colour. If a design's outlines are not the darkest colour, edit the
+  `order`/`skip_colors` YAML, or disable with `--no-satin-outlines`.
 - **Pull-compensation and underlay-inset are intentionally omitted** — they made
   the export hang (>20 min) via shapely buffering on the many-holed polygons.
   Add them per-object in Inkscape if you need them.
-- **`--trim` trims after every object**, which is the simplest behavior. It adds
-  tie-off/tie-in lock stitches (a few % more stitches) but eliminates thread drag.
+- **Trimming is on by default** and cuts long *and* exposed jumps (thread not
+  covered by a later layer). It adds tie-off/tie-in lock stitches (a few % more
+  stitches) but eliminates visible jump thread. Use `--no-trim` to disable.
+- **Density**: `0.4 mm` default; the script warns outside `0.3–0.6 mm`. Per-colour
+  overrides go in the YAML `density:` map.
 - **Export time** scales with design complexity (a few minutes for large patches);
   it's a CPU-bound, single-threaded conversion.
 - Machine format is **VP3** by default. Ink/Stitch can output `.dst`, `.pes`,

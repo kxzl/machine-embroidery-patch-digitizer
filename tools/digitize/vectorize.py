@@ -4,19 +4,26 @@
 Handles two image classes:
   * transparent-background patch renditions  -> interior fills + a SATIN border
       (the dark outer ring is treated as the satin-stitch edge)
-  * opaque flat art (engraving)              -> fills + darkest cluster as linework
+  * opaque flat art (engraving)              -> fills + a SATIN outline layer
 
 Common behaviours:
   * k-means palette (no fixed colors)
   * holes preserved via even-odd fill
+  * the darkest colour's thin regions are recognised as OUTLINES and turned into
+    simple satin columns (skeleton centerline + local width); its solid regions
+    stay fills
   * embroidery-aware cleanup (density 0.4 mm, drop sub-mm detail)
-  * fills ordered by perceptual luma (light -> dark), border topmost
-  * within each color, components ordered by nearest-neighbor to minimise travel
+  * fills ordered by perceptual luma (light -> dark), outlines then border topmost
+  * the needle position is carried across colour layers and components
+    (nearest-neighbour) so travel is minimised globally, not per colour
+  * a jump is trimmed when it is long OR exposed (not covered by a later stitch)
   * optional per-image YAML config (--config) for order/skip/density/border/trim
 
 Usage:
   python tools/digitize/vectorize.py [--colors N] [--border-mm W] [--no-border]
-                                     [--trim] [--trim-mm N] [--config F]
+                                     [--density MM] [--no-satin-outlines]
+                                     [--satin-max-mm W]
+                                     [--no-trim] [--trim-mm N] [--config F]
                                      [input.webp] [output.svg]
 """
 import os
@@ -27,9 +34,12 @@ import numpy as np
 from PIL import Image
 from scipy import ndimage
 from scipy.cluster.vq import kmeans2
-from skimage import filters, measure, morphology
+from scipy.spatial import cKDTree
+from skimage import measure, morphology
 
-_VALUE_FLAGS = {"--colors", "--border-mm", "--trim-mm", "--config"}
+from skeleton import satin_segments
+
+_VALUE_FLAGS = {"--colors", "--border-mm", "--trim-mm", "--config", "--density", "--satin-max-mm"}
 _argc = sys.argv[1:]
 args = []
 _flags = {}
@@ -70,34 +80,61 @@ def load_config(path):
 N_COLORS = int(flag("colors", "5"))
 NO_BORDER = flag("no-border", False) is True
 BORDER_MM = float(flag("border-mm", "2.5"))
-TRIM = flag("trim", False) is True   # master on/off for trimming (auto-cut)
+NO_TRIM = flag("no-trim", False) is True
+TRIM = not NO_TRIM                   # cut long/exposed jumps (default on, machine-ready)
 CONFIG = flag("config", None)
 TRIM_MM = flag("trim-mm", None)      # None = unset (fall back to YAML/default)
+DENSITY_MM = flag("density", None)   # None = unset (fall back to YAML/default)
+NO_SATIN = flag("no-satin-outlines", False) is True
+SATIN_MAX_ARG = flag("satin-max-mm", None)
 
 SIZE_MM = 100.0            # longer side of finished design (mm)
-ROW_SPACING_MM = 0.5       # fill line spacing (LIGHT density, avoid fabric ripping)
-LINEWORK_ROW_SPACING_MM = 0.6  # linework stand-in fill: even lighter (will be re-traced)
+ROW_SPACING_MM = 0.4       # fill density: 0.35-0.45 standard; <0.3 breaks needles, >0.6 leaves gaps
+SATIN_MIN_MM = 0.6         # narrower satin than this is widened to it
+SATIN_MAX_MM = 2.5         # thicker than this is kept as a fill, not an outline
+SATIN_MIN_LEN_MM = 1.0     # drop satin segments shorter than this
 MIN_COMP_MM2 = 0.8         # drop components smaller than this
 MIN_HOLE_MM2 = 0.2         # fill in holes smaller than this
 OPEN_RADIUS = 1            # morph open (px)
 CLOSE_RADIUS = 2           # morph close (px)
 TOLERANCE_MM = 0.15        # polygon simplification (mm)
+TRIM_MIN_MM = 1.0          # never bother cutting jumps shorter than this
 
 # --- per-image YAML overrides -------------------------------------------------
 cfg = load_config(CONFIG)
-if (cfg.get("trim") or {}).get("enabled"):
+if flag("trim", False) is True:
     TRIM = True
+_trim_cfg = cfg.get("trim") or {}
+if "enabled" in _trim_cfg:
+    TRIM = bool(_trim_cfg["enabled"])
+if cfg.get("satin_outlines") is False:
+    NO_SATIN = True
 _border_cfg = (cfg.get("border") or {})
 _border_mode = _border_cfg.get("mode", "auto")
 if _border_cfg.get("thickness_mm") is not None:
     BORDER_MM = float(_border_cfg["thickness_mm"])
+if SATIN_MAX_ARG is not None:
+    SATIN_MAX_MM = float(SATIN_MAX_ARG)
 _extratrim = TRIM_MM if TRIM_MM is not None else (cfg.get("trim") or {}).get("threshold_mm")
 TRIM_THRESHOLD_MM = float(_extratrim) if _extratrim is not None else 5.0
 if TRIM_THRESHOLD_MM < 0:
     TRIM_THRESHOLD_MM = 0.0
 _ORDER = cfg.get("order") or []
 _SKIP = {str(s).lower() for s in (cfg.get("skip_colors") or [])}
-_DENSITY = {str(k).lower(): v for k, v in (cfg.get("density") or {}).items()}
+_dens = cfg.get("density") or {}
+if isinstance(_dens, dict):
+    _DENSITY = {str(k).lower(): v for k, v in _dens.items()}
+elif isinstance(_dens, (int, float)):
+    ROW_SPACING_MM = float(_dens)
+    _DENSITY = {}
+else:
+    _DENSITY = {}
+if DENSITY_MM is not None:
+    ROW_SPACING_MM = float(DENSITY_MM)
+
+if not 0.3 <= ROW_SPACING_MM <= 0.6:
+    print(f"warning: density {ROW_SPACING_MM} mm is outside the safe 0.3-0.6 mm range "
+          f"(too dense breaks needles, too open leaves gaps)")
 
 im = Image.open(IMG).convert("RGBA")
 arr = np.array(im)
@@ -122,10 +159,8 @@ BORDER_PX = BORDER_MM * px_per_mm
 # ---------------------------------------------------------------------------
 if has_transparency:
     silhouette = ~transparent
-    bg_mask = transparent
 else:
     silhouette = np.ones((H, W), dtype=bool)
-    bg_mask = None
 
 rgb = arr[..., :3]
 
@@ -143,12 +178,6 @@ def kmeans_palette(pixels, k):
     return np.clip(cen.round().astype(int), 0, 255)
 
 
-def classify(pixels, centroids):
-    flat = pixels.reshape(-1, 3).astype(float)
-    d2 = ((flat[:, None, :] - centroids[None, :, :]) ** 2).sum(axis=2)
-    return np.argmin(d2, axis=1)
-
-
 def luma(rgb_):
     return 0.2126 * rgb_[0] + 0.7152 * rgb_[1] + 0.0722 * rgb_[2]
 
@@ -159,7 +188,7 @@ def luma(rgb_):
 border_ring = None
 border_color = None
 border_path_d = None
-border_centroid = None
+border_pts = None
 
 border_off = NO_BORDER or _border_mode == "off"
 
@@ -186,7 +215,7 @@ if has_transparency and not border_off:
     if outer is not None:
         poly = measure.approximate_polygon(outer, tolerance=TOLERANCE)
         border_path_d = "M " + " L ".join(f"{x:.1f},{y:.1f}" for y, x in poly) + " Z"
-        border_centroid = (float(poly[:, 0].mean()), float(poly[:, 1].mean()))
+        border_pts = poly
         print(f"border: color {tuple(border_color)} width {BORDER_MM} mm ({len(poly)} pts)")
 
 
@@ -201,21 +230,12 @@ else:
     interior_pix = rgb[silhouette]
 
 centroids = kmeans_palette(interior_pix, N_COLORS)
-nz = len(centroids)
-
-
-def mask_of(i, rgb_im):
-    lab = classify(rgb_im, centroids)  # works on full flat; rebuild below
-    return None
-
+cluster_rgb = centroids
 
 # assign labels for ALL pixels (including transparent) so fills are complete
 flat_all = rgb.reshape(-1, 3).astype(float)
 d2 = ((flat_all[:, None, :] - centroids[None, :, :]) ** 2).sum(axis=2)
 label_all = np.argmin(d2, axis=1).reshape(H, W)
-
-cluster_rgb = centros = centroids
-counts = np.bincount(label_all[silhouette].ravel(), minlength=len(centroids))
 
 # background cluster handling
 if not has_transparency:
@@ -251,12 +271,8 @@ fill_colors = listed + [c for c in _default_colors if c not in listed]
 # skip colors
 fill_colors = [c for c in fill_colors if hexkey(c).lower() not in _SKIP]
 
-# linework = darkest remaining fill (opaque/engraving images only)
-lw = None
-if not has_transparency:
-    cands = [c for c in fill_colors]
-    if cands:
-        lw = min(cands, key=lambda c: luma(cluster_rgb[c]))
+# outline colour = darkest remaining fill; its thin parts become satin
+lw = min(fill_colors, key=lambda c: luma(cluster_rgb[c])) if fill_colors else None
 
 print("order:", [hexkey(c) for c in fill_colors])
 
@@ -279,9 +295,15 @@ def _poly_area(pts):
 
 
 def contour_paths(mask, min_area=MIN_COMP_PX, min_hole=MIN_HOLE_PX, tolerance=TOLERANCE):
+    """Return (path_d_strings, centroids, outer_point_arrays, dropped).
+
+    Components are NOT ordered here; the global emit pass orders them with the
+    needle position carried across colour layers.
+    """
     lab, n = ndimage.label(mask)
     paths = []
     cents = []
+    pts = []
     dropped = 0
     for c in range(1, n + 1):
         comp = (lab == c)
@@ -308,87 +330,141 @@ def contour_paths(mask, min_area=MIN_COMP_PX, min_hole=MIN_HOLE_PX, tolerance=TO
             if areas[i] >= min_hole:
                 keep.append(polys[i])
         sub = ["M " + " L ".join(f"{x:.1f},{y:.1f}" for y, x in p) + " Z" for p in keep]
-        first = np.asarray(keep[0])
-        cent = (float(first[:, 0].mean()), float(first[:, 1].mean()))
+        first = np.asarray(keep[0], dtype=float)
         paths.append(" ".join(sub))
-        cents.append(cent)
-
-    # nearest-neighbor TSP (minimise needle travel), start nearest the origin
-    if cents:
-        pts = cents
-        ordr = []
-        cur = min(range(len(pts)), key=lambda i: pts[i][0] ** 2 + pts[i][1] ** 2)
-        ordr.append(cur)
-        used = {cur}
-        while len(ordr) < len(pts):
-            last = pts[ordr[-1]]
-            best, bd = None, None
-            for i in range(len(pts)):
-                if i in used:
-                    continue
-                d = (pts[i][0] - last[0]) ** 2 + (pts[i][1] - last[1]) ** 2
-                if bd is None or d < bd:
-                    best, bd = i, d
-            ordr.append(best)
-            used.add(best)
-        paths = [paths[i] for i in ordr]
-        cents = [cents[i] for i in ordr]
-    return paths, cents, dropped
+        cents.append((float(first[:, 0].mean()), float(first[:, 1].mean())))
+        pts.append(first)
+    return paths, cents, pts, dropped
 
 
+# ---------------------------------------------------------------------------
+# outlines -> satin: skeletonize the thin part of the darkest colour
+# ---------------------------------------------------------------------------
+lw_thin = None
+if lw is not None and not NO_SATIN:
+    lw_mask = mask_for(lw, use_border_exclusion=has_transparency)
+    r = max(1, int(round(SATIN_MAX_MM * px_per_mm / 2)))
+    thick = ndimage.binary_opening(lw_mask, structure=morphology.disk(r))
+    lw_thin = lw_mask & ~thick
+    if not lw_thin.any():
+        lw_thin = None
+
+# ---------------------------------------------------------------------------
+# collect every stitched object, then order it globally (needle-aware)
+# ---------------------------------------------------------------------------
 print("fills:")
-groups = {}
-cent = {}
+color_items = {}
 for c in fill_colors:
-    paths, cents, dropped = contour_paths(mask_for(c, use_border_exclusion=has_transparency))
-    groups[c] = paths
-    cent[c] = cents
+    mask = mask_for(c, use_border_exclusion=has_transparency)
+    if c == lw and lw_thin is not None:
+        mask = mask & ~lw_thin
+    paths, cents, pts, dropped = contour_paths(mask)
+    items = [dict(cent=cents[i], pts=pts[i], d=paths[i], satin=False,
+                  rgb=cluster_rgb[c], spacing=_DENSITY.get(hexkey(c)), width_px=None)
+             for i in range(len(paths))]
+    color_items[c] = items
     print(f"  {tuple(cluster_rgb[c])}: {len(paths)} comps (dropped {dropped})")
 
-linework = []
-lw_cents = []
-if not has_transparency and lw is not None:
-    linework, lw_cents, _ = contour_paths(mask_for(lw))
-    cent[lw] = lw_cents
-    print(f"  linework {tuple(cluster_rgb[lw])}: {len(linework)} comps")
+outline_items = []
+if lw_thin is not None:
+    for d, poly, w in satin_segments(lw_thin, px_per_mm, SATIN_MIN_LEN_MM,
+                                     SATIN_MIN_MM, SATIN_MAX_MM, TOLERANCE):
+        outline_items.append(dict(cent=(float(poly[:, 0].mean()), float(poly[:, 1].mean())),
+                                  pts=poly, d=d, satin=True, rgb=cluster_rgb[lw],
+                                  spacing=None, width_px=w))
+    print(f"  satin outlines: {len(outline_items)} segments from {tuple(cluster_rgb[lw])}")
 
 
-# ---------------------------------------------------------------------------
-# build global stitch order (fills light->dark, linework, border topmost)
-# ---------------------------------------------------------------------------
-def _cent(i, cents_list):
-    if isinstance(cents_list, list) and i < len(cents_list):
-        return cents_list[i]
-    return (H / 2, W / 2)
+def nn_sort(items, needle):
+    """Nearest-neighbour order of items (by centroid) from the current needle."""
+    remaining = list(items)
+    out = []
+    cur = np.asarray(needle, dtype=float)
+    while remaining:
+        i = min(range(len(remaining)),
+                key=lambda k: (remaining[k]["cent"][0] - cur[0]) ** 2 +
+                              (remaining[k]["cent"][1] - cur[1]) ** 2)
+        nxt = remaining.pop(i)
+        out.append(nxt)
+        cur = np.asarray(nxt["cent"], dtype=float)
+    return out
 
 
-objs = []  # ordered list of dicts: group, cent, satin, rgb, d, spacing, width_px
+objs = []
+color_layer = {}
+needle = [0.0, 0.0]
+layer_no = 0
 for c in fill_colors:
-    if lw is not None and c == lw:
-        continue
-    sd = _DENSITY.get(hexkey(c))
-    for i, d in enumerate(groups[c]):
-        objs.append(dict(group="fills", cent=_cent(i, cent.get(c, [])), satin=False,
-                         rgb=cluster_rgb[c], d=d, spacing=sd, width_px=None))
-if linework:
-    for i, d in enumerate(linework):
-        objs.append(dict(group="linework", cent=_cent(i, lw_cents), satin=False,
-                         rgb=cluster_rgb[lw], d=d, spacing=LINEWORK_ROW_SPACING_MM, width_px=None))
+    for o in nn_sort(color_items[c], needle):
+        o["group_id"] = "color%d" % layer_no
+        o["group_label"] = hexkey(c)
+        o["layer"] = layer_no
+        objs.append(o)
+        needle = o["cent"]
+    color_layer[c] = layer_no
+    layer_no += 1
+
+if outline_items:
+    for o in nn_sort(outline_items, needle):
+        o["group_id"] = "outlines"
+        o["group_label"] = "Outline"
+        o["layer"] = layer_no
+        objs.append(o)
+        needle = o["cent"]
+    layer_no += 1
+
 if border_path_d is not None:
-    objs.append(dict(group="border", cent=border_centroid or (H / 2, W / 2), satin=True,
-                     rgb=border_color, d=border_path_d, spacing=None, width_px=BORDER_PX))
+    objs.append(dict(group_id="border", group_label="Border", layer=layer_no,
+                     cent=(float(border_pts[:, 0].mean()), float(border_pts[:, 1].mean())) if border_pts is not None else (H / 2, W / 2),
+                     pts=border_pts, d=border_path_d, satin=True, rgb=border_color,
+                     spacing=None, width_px=BORDER_PX))
 
 
-def dist_mm(a, b):
-    return float(np.hypot(a[0] - b[0], a[1] - b[1])) / px_per_mm
+# ---------------------------------------------------------------------------
+# trim: cut a jump that is long OR exposed (not hidden by a later stitch)
+# ---------------------------------------------------------------------------
+def gap_and_segment(a, b):
+    """Nearest-pair distance (mm) between two objects, plus the connecting segment."""
+    pa, pb = a.get("pts"), b.get("pts")
+    if pa is None or pb is None:
+        d = float(np.hypot(a["cent"][0] - b["cent"][0], a["cent"][1] - b["cent"][1])) / px_per_mm
+        return d, np.asarray(a["cent"], float), np.asarray(b["cent"], float)
+    d, idx = cKDTree(pa).query(pb)
+    j = int(np.argmin(d))
+    return float(d[j]) / px_per_mm, pa[idx[j]], pb[j]
 
 
-# threshold-based trim: cut only when the jump between consecutive targets is long
+def is_hidden(p0, p1, next_layer):
+    """True if the straight jump is covered by something stitched at/after next_layer."""
+    n = max(8, int(np.hypot(*(p1 - p0)) / px_per_mm * 2))
+    for t in np.linspace(0.0, 1.0, n + 2)[1:-1]:
+        p = p0 + t * (p1 - p0)
+        y, x = int(round(p[0])), int(round(p[1]))
+        if not (0 <= y < H and 0 <= x < W) or not silhouette[y, x]:
+            return False
+        if border_ring is not None and border_ring[y, x]:
+            continue
+        if lw_thin is not None and lw_thin[y, x]:
+            continue
+        if color_layer.get(int(label_all[y, x]), -1) < next_layer:
+            return False
+    return True
+
+
 trim_after = [False] * len(objs)
+n_trims = 0
 if TRIM:
-    for i in range(1, len(objs)):
-        if TRIM_THRESHOLD_MM == 0 or dist_mm(objs[i - 1]["cent"], objs[i]["cent"]) > TRIM_THRESHOLD_MM:
-            trim_after[i - 1] = True
+    for i in range(len(objs) - 1):
+        if TRIM_THRESHOLD_MM == 0:
+            trim_after[i] = True
+            continue
+        d, p0, p1 = gap_and_segment(objs[i], objs[i + 1])
+        if d <= TRIM_MIN_MM:
+            continue
+        if d > TRIM_THRESHOLD_MM or not is_hidden(p0, p1, objs[i + 1]["layer"]):
+            trim_after[i] = True
+    n_trims = sum(trim_after)
+    print(f"trim: {n_trims} cuts / {len(objs)} objects (threshold {TRIM_THRESHOLD_MM} mm)")
 
 
 def el(id_, fill_rgb, d, spacing=None, trim_after=False):
@@ -425,13 +501,14 @@ p.append(
 idx = 0
 current_group = None
 for o, tm in zip(objs, trim_after):
-    if o["group"] != current_group:
+    if o["group_id"] != current_group:
         if current_group is not None:
             p.append('  </g>\n')
-        p.append(f'  <g inkscape:label="{o["group"]}" inkscape:groupmode="layer" id="{o["group"]}">\n')
-        current_group = o["group"]
+        p.append(f'  <g inkscape:label="{o["group_label"]}" inkscape:groupmode="layer" '
+                 f'id="{o["group_id"]}">\n')
+        current_group = o["group_id"]
     if o["satin"]:
-        p.append("    " + satin_el(f"b{idx}", o["rgb"], o["d"], o["width_px"], trim_after=tm) + "\n")
+        p.append("    " + satin_el(f"s{idx}", o["rgb"], o["d"], o["width_px"], trim_after=tm) + "\n")
     else:
         p.append("    " + el(f"f{idx}", o["rgb"], o["d"], spacing=o["spacing"], trim_after=tm) + "\n")
     idx += 1

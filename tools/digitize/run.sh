@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # One-shot: image -> pre-digitized SVG + VP3 machine file.
 # Usage: tools/digitize/run.sh [flags] <input image>
-#   --colors N | --border-mm W | --no-border | --trim | --trim-mm N | --config F
+#   --colors N | --border-mm W | --no-border | --density MM
+#   --no-satin-outlines | --satin-max-mm W
+#   --no-trim | --trim-mm N | --config F
 #   --no-export   (skip the Ink/Stitch VP3 export, produce SVG only)
 set -euo pipefail
 
@@ -11,8 +13,8 @@ NO_EXPORT=0
 while [[ $# -gt 0 ]]; do
   a="$1"; shift
   case "$a" in
-    --config=*|--colors=*|--border-mm=*|--trim-mm=*) FLAGS+=("$a") ;;
-    --config|--colors|--border-mm|--trim-mm)
+    --config=*|--colors=*|--border-mm=*|--trim-mm=*|--density=*|--satin-max-mm=*) FLAGS+=("$a") ;;
+    --config|--colors|--border-mm|--trim-mm|--density|--satin-max-mm)
       FLAGS+=("$a" "$1"); shift ;;
     --no-export) NO_EXPORT=1 ;;
     -*) FLAGS+=("$a") ;;
