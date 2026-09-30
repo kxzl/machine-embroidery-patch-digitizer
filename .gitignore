@@ -5,6 +5,9 @@
 # vendored Ink/Stitch checkout
 inkstitch/
 
+__pycache__/
+*.pyc
+
 # generated pipeline artifacts
 work/
 *.webp
