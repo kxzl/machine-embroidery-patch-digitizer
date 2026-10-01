@@ -11,7 +11,7 @@
 ## Features
 
 - **Outlines become real satin.** The darkest colour's thin regions are skeletonized and emitted as Ink/Stitch satin columns whose width follows the local line thickness; solid areas stay fills.
-- **Travel-aware stitch order.** Needle position is carried across colour layers and components (nearest-neighbour) — measured **7–10× less thread travel**.
+- **Travel-aware stitch order.** Needle position is carried across colour layers and components (nearest-neighbour) — measured **up to ~10× less thread travel** in testing.
 - **Smart trimming** *(on by default)*. Cuts a jump when it is long (> 4 mm) **or** exposed (not covered by a later-stitched layer); jumps under 2 mm are skipped.
 - **Safe density.** Default 0.4 mm fill spacing, with a warning outside the 0.3–0.6 mm safe band (needle-break vs. unfilled).
 - **Patch border.** Satin border auto-detected/added; fills ordered light → dark; holes preserved; per-image YAML config (`order`, `skip_colors`, `density`, `border`, `trim`).

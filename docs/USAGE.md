@@ -5,7 +5,7 @@ Turn a raster image (WebP/PNG/JPG) into a pre-digitized embroidery **SVG** for
 (Husqvarna/Viking), fully headless (no Inkscape GUI needed).
 
 ```
-image → color separation → vectorize (fills + satin border) → SVG → Ink/Stitch → .vp3
+image → color separation → vectorize (fills + satin outlines + satin border) → SVG → Ink/Stitch → .vp3
 ```
 
 ---
