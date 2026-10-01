@@ -90,6 +90,12 @@ To run `vectorize.py` directly and skip the export:
 .venv/bin/python tools/digitize/vectorize.py [flags] input.webp work/out.svg
 ```
 
+To render a machine file to a colour stitch-plan preview:
+
+```bash
+.venv/bin/python tools/digitize/preview.py work/out.vp3 work/out_plan.png
+```
+
 ---
 
 ## Tunable constants

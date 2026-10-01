@@ -83,6 +83,7 @@ tools/
 │   ├── run.sh          # one-shot CLI: image → SVG + VP3
 │   ├── vectorize.py    # separation, vectorize, satin outlines, ordering, trim
 │   ├── skeleton.py     # centre-line extraction for satin outlines
+│   ├── preview.py      # render a VP3 to a colour stitch-plan PNG
 │   ├── analyze.py      # colour/region statistics for debugging separation
 │   └── make_config.*   # per-image YAML config helper
 └── wxstub/             # minimal wx shim so Ink/Stitch runs headless
