@@ -65,7 +65,7 @@
   <div class="row">
     <div>
       <label>Trim (auto-cut)</label>
-      <select id="trimEnabled"><option value="false" selected>off</option><option value="true">on</option></select>
+      <select id="trimEnabled"><option value="false">off</option><option value="true" selected>on</option></select>
     </div>
     <div>
       <label>Cut when jump &gt; (mm)</label>
@@ -112,7 +112,7 @@ function render() {
       <span class="swatch" style="background:${c.hex}"></span>
       <span class="hex">${c.hex}</span>
       <span class="hint" style="flex:1">density</span>
-      <input type="number" step="0.05" min="0.1" placeholder="0.5" value="${c.density ?? ''}" onchange="state.colors[${i}].density = (this.value===''?null:parseFloat(this.value))">
+      <input type="number" step="0.05" min="0.1" placeholder="0.4" value="${c.density ?? ''}" onchange="state.colors[${i}].density = (this.value===''?null:parseFloat(this.value))">
       <label class="skip"><input type="checkbox" ${c.skip?'checked':''} onchange="state.colors[${i}].skip = this.checked"> skip</label>
       <button class="move ghost" onclick="move(${i},-1)">▲</button>
       <button class="move ghost" onclick="move(${i},1)">▼</button>

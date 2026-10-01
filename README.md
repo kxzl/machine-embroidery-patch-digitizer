@@ -74,7 +74,7 @@ put on `PYTHONPATH` automatically by `run.sh` and `vectorize.py` usage below.
 | `--no-satin-outlines` | off | Keep the darkest colour entirely as fill instead of turning thin linework into satin. |
 | `--satin-max-mm W` | `2.5` | Regions of the outline colour thicker than this stay fills (not outlines). |
 | `--no-trim` | off | Trimming is **on by default**; this disables it. |
-| `--trim-mm N` | `5.0` | Cut when a jump is longer than this (mm); `0` = after every object. |
+| `--trim-mm N` | `4.0` | Cut when a jump is longer than this (mm); `0` = every object. Jumps under 2 mm are never cut. |
 | (positional) input | — | Path to the source image (`.webp`/`.png`/`.jpg`). |
 | (positional) output | `work/design.svg` | Output SVG path. |
 
@@ -105,6 +105,7 @@ These live at the top of `tools/digitize/vectorize.py` and are not CLI flags
 | `SATIN_MAX_MM` | `2.5` | Outline-colour runs thicker than this stay fills, not satin. |
 | `SATIN_MIN_LEN_MM` | `2.0` | Drop outline runs shorter than this (removes specks/micro-segments). |
 | `SATIN_PULL_MM` | `0.2` | Satin pull compensation per side (closes the gap where satin meets its neighbours). |
+| `TRIM_MIN_MM` | `2.0` | Jumps shorter than this are never cut, even with `--trim-mm 0`. |
 | `MIN_COMP_MM2` | `0.8` | Drop filled components smaller than this (mm²). Anything sub-mm can't be stitched cleanly. |
 | `MIN_HOLE_MM2` | `0.2` | Fill in holes smaller than this (removes unstitchable specks). |
 | `OPEN_RADIUS` / `CLOSE_RADIUS` | `1` / `2` | Morphological cleanup (px) to remove specks/spurs and close tiny gaps. |

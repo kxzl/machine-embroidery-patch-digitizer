@@ -23,7 +23,7 @@ Usage:
   python tools/digitize/vectorize.py [--colors N] [--border-mm W] [--no-border]
                                      [--density MM] [--no-satin-outlines]
                                      [--satin-max-mm W]
-                                     [--no-trim] [--trim-mm N] [--config F]
+                                     [--trim] [--no-trim] [--trim-mm N] [--config F]
                                      [input.webp] [output.svg]
 """
 import os
@@ -99,7 +99,7 @@ MIN_HOLE_MM2 = 0.2         # fill in holes smaller than this
 OPEN_RADIUS = 1            # morph open (px)
 CLOSE_RADIUS = 2           # morph close (px)
 TOLERANCE_MM = 0.15        # polygon simplification (mm)
-TRIM_MIN_MM = 2.0          # never bother cutting jumps shorter than this (Ink/Stitch collapses them anyway)
+TRIM_MIN_MM = 2.0          # never cut jumps shorter than this (Ink/Stitch adds no locks below ~3 mm)
 
 # --- per-image YAML overrides (CLI always wins) -------------------------------
 cfg = load_config(CONFIG)
@@ -117,27 +117,28 @@ if _border_cfg.get("thickness_mm") is not None and flag("border-mm", None) is No
 if SATIN_MAX_ARG is not None:
     SATIN_MAX_MM = float(SATIN_MAX_ARG)
 _extratrim = TRIM_MM if TRIM_MM is not None else (cfg.get("trim") or {}).get("threshold_mm")
-TRIM_THRESHOLD_MM = float(_extratrim) if _extratrim is not None else 5.0
+TRIM_THRESHOLD_MM = float(_extratrim) if _extratrim is not None else 4.0
 if TRIM_THRESHOLD_MM < 0:
     TRIM_THRESHOLD_MM = 0.0
 _ORDER = cfg.get("order") or []
 _SKIP = {str(s).lower() for s in (cfg.get("skip_colors") or [])}
 _dens = cfg.get("density") or {}
-if isinstance(_dens, dict):
-    _DENSITY = {str(k).lower(): v for k, v in _dens.items()}
-elif isinstance(_dens, (int, float)):
+if isinstance(_dens, (int, float)):
     ROW_SPACING_MM = float(_dens)
     _DENSITY = {}
+elif isinstance(_dens, dict):
+    _DENSITY = {}
+    for _k, _v in _dens.items():
+        try:
+            _DENSITY[str(_k).lower()] = float(_v)
+        except (TypeError, ValueError):
+            print(f"warning: ignoring non-numeric density {_v!r} for {_k}")
 else:
     _DENSITY = {}
 if DENSITY_MM is not None:
     ROW_SPACING_MM = float(DENSITY_MM)
 
 for _name, _val in [("global", ROW_SPACING_MM)] + list(_DENSITY.items()):
-    try:
-        _val = float(_val)
-    except (TypeError, ValueError):
-        continue
     if not 0.3 <= _val <= 0.6:
         print(f"warning: density {_val} mm ({_name}) is outside the safe 0.3-0.6 mm range "
               f"(too dense breaks needles, too open leaves gaps)")
@@ -230,7 +231,10 @@ if has_transparency and not border_off:
 # ---------------------------------------------------------------------------
 interior_mask = silhouette & (~border_ring if border_ring is not None else silhouette)
 if not interior_mask.any():
-    # very thin patch: the border ring swallowed the whole silhouette
+    # very thin patch: the border ring swallowed the whole silhouette -> keep the
+    # interior as fills and drop the ring exclusion, otherwise everything vanishes
+    print("warning: border ring covers the whole silhouette; keeping interior as fills")
+    border_ring = None
     interior_mask = silhouette
 if has_transparency:
     interior_pix = rgb[interior_mask]
@@ -372,7 +376,10 @@ if lw is not None and not NO_SATIN:
                                       rgb=cluster_rgb[lw], spacing=None, width_px=w))
             cover_draw.line([(float(x), float(y)) for y, x in poly], fill=255,
                             width=max(1, int(round(w))), joint="curve")
-        lw_cover = (np.array(cover_img) > 0) & lw_mask
+        # dilate the band a couple of px before carving the fill: otherwise the
+        # band-edge mismatch with the simplified skeleton leaves sub-mm slivers
+        lw_cover = ndimage.binary_dilation((np.array(cover_img) > 0) & lw_mask,
+                                           structure=morphology.disk(2))
         print(f"satin outlines: {len(outline_items)} segments from {tuple(cluster_rgb[lw])}")
 
 # ---------------------------------------------------------------------------
@@ -422,12 +429,12 @@ for c in fill_colors:
     for o in nn_sort(color_items[c], needle):
         o["group_id"] = "color%d" % layer_no
         o["group_label"] = hexkey(c)
-        o["layer"] = layer_no
         o["index"] = len(objs)
         stitch_index[color_keep_lab[c] == o["lab_id"]] = o["index"]
         objs.append(o)
         needle = o["cent"]
     layer_no += 1
+color_keep_lab.clear()
 
 if outline_items:
     satin_img = Image.new("I", (W, H), -1)
@@ -435,7 +442,6 @@ if outline_items:
     for o in nn_sort(outline_items, needle):
         o["group_id"] = "outlines"
         o["group_label"] = "Outline"
-        o["layer"] = layer_no
         o["index"] = len(objs)
         satin_draw.line([(float(x), float(y)) for y, x in o["pts"]], fill=o["index"],
                         width=max(1, int(round(o["width_px"]))), joint="curve")
@@ -445,20 +451,23 @@ if outline_items:
     layer_no += 1
 
 if border_path_d is not None:
-    o = dict(group_id="border", group_label="Border", layer=layer_no,
+    o = dict(group_id="border", group_label="Border",
              cent=(float(border_pts[:, 0].mean()), float(border_pts[:, 1].mean())) if border_pts is not None else (H / 2, W / 2),
              pts=border_pts, d=border_path_d, satin=True, rgb=border_color,
              spacing=None, width_px=BORDER_PX)
     o["index"] = len(objs)
-    if border_ring is not None:
-        stitch_index[border_ring] = o["index"]
-    elif border_pts is not None:
+    # model the border as its actual stroke (BORDER_PX wide, centred on the
+    # contour), not the full ring band -- the stroke only reaches half way in
+    if border_pts is not None:
         bim = Image.new("I", (W, H), -1)
         ring_pts = [(float(x), float(y)) for y, x in border_pts]
         ImageDraw.Draw(bim).line(ring_pts + ring_pts[:1], fill=o["index"],
                                  width=max(1, int(round(BORDER_PX))), joint="curve")
         stitch_index = np.maximum(stitch_index, np.array(bim, dtype=np.int32))
     objs.append(o)
+
+if not objs:
+    print("warning: no stitchable objects produced (single-colour image or all colours skipped?)")
 
 
 # ---------------------------------------------------------------------------
@@ -490,13 +499,10 @@ trim_after = [False] * len(objs)
 n_trims = 0
 if TRIM:
     for i in range(len(objs) - 1):
-        if TRIM_THRESHOLD_MM == 0:
-            trim_after[i] = True
-            continue
         d, p0, p1 = gap_and_segment(objs[i], objs[i + 1])
         if d <= TRIM_MIN_MM:
             continue
-        if d > TRIM_THRESHOLD_MM or not is_hidden(p0, p1, i):
+        if TRIM_THRESHOLD_MM == 0 or d > TRIM_THRESHOLD_MM or not is_hidden(p0, p1, i):
             trim_after[i] = True
     n_trims = sum(trim_after)
     print(f"trim: {n_trims} cuts / {len(objs)} objects (threshold {TRIM_THRESHOLD_MM} mm)")
