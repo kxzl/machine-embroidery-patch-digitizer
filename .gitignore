@@ -18,3 +18,9 @@ work/
 *.zip
 *.err
 *.svg
+
+# keep committed documentation assets
+!docs/assets/
+!docs/assets/**
+!docs/*.svg
+!docs/*.png

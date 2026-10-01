@@ -1,162 +1,108 @@
-# Digitize Patches — raster image → embroidery
+# Digitize Patches
 
-Turn a raster image (WebP/PNG/JPG) into a pre-digitized embroidery **SVG** for
-[Ink/Stitch](https://inkstitch.org) and export a machine-ready **VP3** file
-(Husqvarna/Viking), fully headless (no Inkscape GUI needed).
+**Turn a raster image into a pre-digitized [Ink/Stitch](https://inkstitch.org) SVG and a machine-ready VP3 embroidery file — fully headless, no Inkscape GUI required.**
 
-```
-image → color separation → vectorize (fills + satin border) → SVG → Ink/Stitch → .vp3
+![Pipeline: raster image to editable SVG to VP3](docs/assets/hero-scavenger.png)
+
+*Left to right: source raster → rendered Ink/Stitch SVG (fills + satin linework) → VP3 stitch plan. Same design, end to end.*
+
+---
+
+## Features
+
+- **Outlines become real satin.** The darkest colour's thin regions are skeletonized and emitted as Ink/Stitch satin columns whose width follows the local line thickness; solid areas stay fills.
+- **Travel-aware stitch order.** Needle position is carried across colour layers and components (nearest-neighbour) — measured **7–10× less thread travel**.
+- **Smart trimming** *(on by default)*. Cuts a jump when it is long (> 4 mm) **or** exposed (not covered by a later-stitched layer); jumps under 2 mm are skipped.
+- **Safe density.** Default 0.4 mm fill spacing, with a warning outside the 0.3–0.6 mm safe band (needle-break vs. unfilled).
+- **Patch border.** Satin border auto-detected/added; fills ordered light → dark; holes preserved; per-image YAML config (`order`, `skip_colors`, `density`, `border`, `trim`).
+- **Deterministic and headless.** Reproducible output via a small `wx` stub + the Ink/Stitch CLI.
+
+---
+
+## Pipeline
+
+```mermaid
+flowchart LR
+    A[Raster image<br/>WebP · PNG · JPG] --> B[Colour separation<br/>k-means posterize]
+    B --> C{Vectorize}
+    C -->|fills| D[Closed fill regions<br/>holes preserved]
+    C -->|thin dark linework| E[Skeletonize into satin columns<br/>width follows line thickness]
+    D --> F[Travel-aware ordering + trim<br/>Ink/Stitch SVG]
+    E --> F
+    F --> G[Ink/Stitch headless CLI]
+    G --> H[VP3<br/>Husqvarna / Viking]
 ```
 
 ---
 
-## What it produces
+## Preview
 
-| File | Purpose |
-|---|---|
-| `work/<name>.svg` | Pre-digitized vector design. Open in Inkscape to review, tune, or run the Simulator. |
-| `work/<name>.vp3` | Machine file for Husqvarna/Viking (VP3 format). |
-| `work/<name>_posterized.png` | Flat-color preview of the posterization (compare against the original). |
-| `work/regions.json` (via `analyze.py`) | Color/region statistics for debugging separation. |
+![Skyfowl before and after: source, colour separation, and VP3 stitch plan](docs/assets/skyfowl-before-after.png)
+
+*Skyfowl patch: source `.webp` → colour-separated flat art → VP3 stitch plan. The satin border and outlines are generated automatically.*
+
+<p align="center">
+  <img src="docs/assets/pipeline-stages.png" alt="Pipeline stages: raster input, k-means separation, vectorize plus satin, VP3 stitch plan" width="720">
+</p>
 
 ---
 
 ## Quick start
 
 ```bash
-# one-shot: image → svg + vp3
+# image → Ink/Stitch SVG + VP3
 tools/digitize/run.sh path/to/image.webp
 
-# common options (trim + satin outlines are on by default)
-tools/digitize/run.sh --border-mm 2.5 path/to/patch.webp
-tools/digitize/run.sh --density 0.35 --colors 8 path/to/image.webp
+# more colours, tighter fill density
+tools/digitize/run.sh --density 0.35 --colors 8 img.jpg
+
+# keep outlines as fills, disable trimming
+tools/digitize/run.sh --no-trim --no-satin-outlines img.webp
 ```
 
-Output lands in `work/` alongside the repo.
-
----
-
-## Setup (one-time)
-
-The repo is wired for a Linux environment with **no `sudo`/`apt`**. Reproduce with:
-
-```bash
-# Python 3.13 venv (Python 3.11+ works; 3.13 is what's here)
-python3 -m venv .venv
-
-# Ink/Stitch runtime deps (wxPython/PyGObject are NOT needed headless)
-.venv/bin/python -m pip install --no-deps "inkex==1.4.1"
-.venv/bin/python -m pip install pystitch "lxml<6" cssselect "numpy==2.2.6" pyparsing \
-  tinycss2 packaging pillow pySerial webencodings networkx "shapely>=2.0.0" platformdirs \
-  "jinja2>2.9" requests colormath2 "flask>=2.2.0" fonttools "trimesh>=3.15.2" diskcache \
-  flask-cors scipy scikit-image
-
-# Ink/Stitch source (already cloned here; re-clone on a fresh machine)
-git clone --recurse-submodules https://github.com/inkstitch/inkstitch
-```
-
-`tools/wxstub/` is a synthetic wx shim that lets Ink/Stitch run headless; it's
-put on `PYTHONPATH` automatically by `run.sh` and `vectorize.py` usage below.
-
-> `inkex` must be installed with `--no-deps` to skip its `PyGObject` requirement
-> (which needs a C compiler and is only used for the Inkscape GUI).
-
----
-
-## Command-line options
-
-| Flag | Default | Meaning |
-|---|---|---|
-| `--colors N` | `5` | Number of posterized thread colors (k-means). Raise for more shading detail, lower for cleaner/bolder patches. |
-| `--border-mm W` | `2.5` | Satin border width (mm). Only applies to transparent-background images. |
-| `--no-border` | off | Don't add the satin border. |
-| `--density MM` | `0.4` | Default fill row spacing (mm). Keep in `0.3–0.6`; below breaks needles, above leaves gaps. |
-| `--no-satin-outlines` | off | Keep the darkest colour entirely as fill instead of turning thin linework into satin. |
-| `--satin-max-mm W` | `2.5` | Regions of the outline colour thicker than this stay fills (not outlines). |
-| `--no-trim` | off | Trimming is **on by default**; this disables it. |
-| `--trim-mm N` | `4.0` | Cut a jump longer than this (mm); `0` = cut every long/exposed jump. Jumps under 2 mm are always skipped. |
-| (positional) input | — | Path to the source image (`.webp`/`.png`/`.jpg`). |
-| (positional) output | `work/design.svg` | Output SVG path. |
-
-`run.sh` forwards any `--*` flag to `vectorize.py`, e.g.:
-
-```bash
-tools/digitize/run.sh --colors 8 --trim --border-mm 3 Patch.png
-```
-
-To run `vectorize.py` directly and skip the export:
-
-```bash
-.venv/bin/python tools/digitize/vectorize.py [flags] input.webp work/out.svg
-```
-
----
-
-## Tunable constants
-
-These live at the top of `tools/digitize/vectorize.py` and are not CLI flags
-(edit and re-run):
-
-| Constant | Default | Meaning |
-|---|---|---|
-| `SIZE_MM` | `100` | Longest side of the finished design (mm). |
-| `ROW_SPACING_MM` | `0.4` | Fill line spacing (density). `0.35–0.45` is the safe band for 40 wt thread: `<0.3` packs the needle and breaks it, `>0.6` leaves the fabric showing through. A warning is printed outside `0.3–0.6`. |
-| `SATIN_MIN_MM` | `0.6` | Thinner outline runs are widened to at least this (Ink/Stitch ignores satin below ~0.3 mm and recommends ≥1 mm). |
-| `SATIN_MAX_MM` | `2.5` | Outline-colour runs thicker than this stay fills, not satin. |
-| `SATIN_MIN_LEN_MM` | `2.0` | Drop outline runs shorter than this (removes specks/micro-segments). |
-| `SATIN_PULL_MM` | `0.2` | Satin pull compensation per side (closes the gap where satin meets its neighbours). |
-| `TRIM_MIN_MM` | `2.0` | Jumps shorter than this are never cut, even with `--trim-mm 0`. |
-| `MIN_COMP_MM2` | `0.8` | Drop filled components smaller than this (mm²). Anything sub-mm can't be stitched cleanly. |
-| `MIN_HOLE_MM2` | `0.2` | Fill in holes smaller than this (removes unstitchable specks). |
-| `OPEN_RADIUS` / `CLOSE_RADIUS` | `1` / `2` | Morphological cleanup (px) to remove specks/spurs and close tiny gaps. |
-| `TOLERANCE_MM` | `0.15` | Polygon simplification tolerance (mm) — smaller = smoother curves, bigger = fewer points. |
+Output lands in `work/`: `<name>.svg` (editable, opens in Inkscape) and `<name>.vp3` (machine file).
 
 ---
 
 ## How it works
 
-1. **Classify the image**:
-   - *Transparent background* → patch: uses the alpha channel as the silhouette,
-     detects the dark outer ring as the **satin border**, and fills the interior.
-   - *Opaque* → flat art: drops the lightest cluster (paper) and treats the
-     darkest cluster as **outlines** on its own top layer.
-2. **Denoise + posterize**: median filter, then k-means to `--colors` flat colors.
-3. **Vectorize**: each color becomes closed `fill` regions with holes preserved
-   (`fill-rule="evenodd"`); sub-mm components/holes are dropped.
-4. **Outlines → satin**: the darkest colour's *thin* regions (thinner than
-   `--satin-max-mm`) are skeletonized into centerlines and emitted as simple
-   satin columns whose width follows the local line thickness; its solid regions
-   stay fills.
-5. **Order for travel**: the needle position is carried across colour layers and
-   components (nearest-neighbour), so the sequence is globally short, not just
-   short within one colour.
-6. **Trim**: a jump is cut when it is longer than `--trim-mm` **or** when it is
-   not hidden under a later-stitched layer (an exposed jump thread).
-7. **Emit Ink/Stitch SVG** with per-object params: `row_spacing_mm` (density),
-   `trim_after`, and `satin_column` for outlines and border.
-8. **Export** via Ink/Stitch headless CLI to `.vp3`.
-
-Stitch order: fills (bottom, light→dark) → satin outlines → satin border (top).
+1. **Classify** — transparent backgrounds are treated as patches (alpha silhouette + detected satin border); opaque art drops the lightest cluster as "paper" and routes the darkest to outlines.
+2. **Denoise + posterize** — median filter, then k-means down to `--colors` flat thread colours.
+3. **Vectorize** — each colour becomes closed `fill` regions with holes preserved (`fill-rule="evenodd"`); sub-mm specks are dropped.
+4. **Outlines → satin** — thin runs of the outline colour are skeletonized into centre lines and emitted as satin columns that widen to match the local stroke.
+5. **Order + trim** — components are sequenced by nearest-neighbour across layers, then long or exposed jumps are cut.
+6. **Export** — the SVG is written with per-object Ink/Stitch parameters (`row_spacing_mm`, `trim_after`, `satin_column`) and converted to VP3 headlessly.
 
 ---
 
-## Notes & known caveats
+## Repo layout
 
-- **Outlines are auto-converted to satin** (skeleton centerline + local width) for
-  the darkest colour: each skeleton run is classified by its own thickness, so
-  thin lines become satin and solid areas stay fills. If a design's outlines are
-  not the darkest colour, edit the `order`/`skip_colors` YAML, or disable with
-  `--no-satin-outlines`.
-- **Pull-compensation and underlay-inset are intentionally omitted for fills** —
-  they made the export hang (>20 min) via shapely buffering on the many-holed
-  polygons. Satin elements do get a small pull compensation (0.2 mm).
-- **Trimming is on by default** and cuts long *and* exposed jumps (thread not
-  covered by a later layer). Jumps under 2 mm are never cut. It adds tie-off/tie-in
-  lock stitches (a few % more stitches) but eliminates visible jump thread.
-  Use `--no-trim` to disable.
-- **Density**: `0.4 mm` default; the script warns outside `0.3–0.6 mm`. Per-colour
-  overrides go in the YAML `density:` map.
-- **Export time** scales with design complexity (a few minutes for large patches);
-  it's a CPU-bound, single-threaded conversion.
-- Machine format is **VP3** by default. Ink/Stitch can output `.dst`, `.pes`,
-  `.jef`, etc. — change `--format-vp3=True` in `tools/digitize/run.sh`.
+```
+tools/
+├── digitize/
+│   ├── run.sh          # one-shot CLI: image → SVG + VP3
+│   ├── vectorize.py    # separation, vectorize, satin outlines, ordering, trim
+│   ├── skeleton.py     # centre-line extraction for satin outlines
+│   ├── analyze.py      # colour/region statistics for debugging separation
+│   └── make_config.*   # per-image YAML config helper
+└── wxstub/             # minimal wx shim so Ink/Stitch runs headless
+docs/
+├── USAGE.md            # full setup, every flag and tunable constant
+└── assets/             # README previews
+```
+
+---
+
+## Docs
+
+Full setup instructions (Python 3.13 venv + vendored Ink/Stitch), every command-line flag, tunable constants, and known caveats live in **[docs/USAGE.md](docs/USAGE.md)**.
+
+---
+
+<p>
+  <a href="docs/USAGE.md"><img src="https://img.shields.io/badge/docs-USAGE.md-blue?style=flat-square" alt="Docs"></a>
+  <img src="https://img.shields.io/badge/output-SVG%20%2B%20VP3-8957e5?style=flat-square" alt="Output: SVG + VP3">
+  <img src="https://img.shields.io/badge/machine-Husqvarna%20%2F%20Viking-2ea44f?style=flat-square" alt="Husqvarna / Viking">
+  <img src="https://img.shields.io/badge/python-3.11%2B-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/built%20on-Ink%2FStitch-f59e0b?style=flat-square" alt="Built on Ink/Stitch">
+</p>
