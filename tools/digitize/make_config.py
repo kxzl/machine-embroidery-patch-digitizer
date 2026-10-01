@@ -106,7 +106,7 @@ order:
 # Colors to never stitch (e.g. background/white):
 skip_colors: []
 
-# Per-color fill density (row_spacing_mm). Omit a color to use the default (0.5).
+# Per-color fill density (row_spacing_mm). Omit a color to use the default (0.4).
 density: {{}}
 
 # Border: mode = auto | off | force_black
@@ -115,8 +115,9 @@ border:
   thickness_mm: 2.5
 
 # Trim: cut when a jump is longer than threshold_mm (0 = after every object).
+# Jumps shorter than 2mm are never cut, and exposed jumps are cut regardless.
 trim:
-  enabled: false
+  enabled: true
   threshold_mm: 5.0
 """
 

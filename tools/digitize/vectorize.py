@@ -31,7 +31,7 @@ import sys
 
 import yaml
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 from scipy import ndimage
 from scipy.cluster.vq import kmeans2
 from scipy.spatial import cKDTree
@@ -92,26 +92,27 @@ SIZE_MM = 100.0            # longer side of finished design (mm)
 ROW_SPACING_MM = 0.4       # fill density: 0.35-0.45 standard; <0.3 breaks needles, >0.6 leaves gaps
 SATIN_MIN_MM = 0.6         # narrower satin than this is widened to it
 SATIN_MAX_MM = 2.5         # thicker than this is kept as a fill, not an outline
-SATIN_MIN_LEN_MM = 1.0     # drop satin segments shorter than this
+SATIN_MIN_LEN_MM = 2.0     # drop satin segments shorter than this (kills micro-segment flood)
+SATIN_PULL_MM = 0.2        # satin pull compensation per side (closes the gap at the ends)
 MIN_COMP_MM2 = 0.8         # drop components smaller than this
 MIN_HOLE_MM2 = 0.2         # fill in holes smaller than this
 OPEN_RADIUS = 1            # morph open (px)
 CLOSE_RADIUS = 2           # morph close (px)
 TOLERANCE_MM = 0.15        # polygon simplification (mm)
-TRIM_MIN_MM = 1.0          # never bother cutting jumps shorter than this
+TRIM_MIN_MM = 2.0          # never bother cutting jumps shorter than this (Ink/Stitch collapses them anyway)
 
-# --- per-image YAML overrides -------------------------------------------------
+# --- per-image YAML overrides (CLI always wins) -------------------------------
 cfg = load_config(CONFIG)
 if flag("trim", False) is True:
     TRIM = True
 _trim_cfg = cfg.get("trim") or {}
-if "enabled" in _trim_cfg:
+if "enabled" in _trim_cfg and flag("trim", False) is not True and not NO_TRIM:
     TRIM = bool(_trim_cfg["enabled"])
-if cfg.get("satin_outlines") is False:
+if cfg.get("satin_outlines") is False and not flag("no-satin-outlines", False):
     NO_SATIN = True
 _border_cfg = (cfg.get("border") or {})
 _border_mode = _border_cfg.get("mode", "auto")
-if _border_cfg.get("thickness_mm") is not None:
+if _border_cfg.get("thickness_mm") is not None and flag("border-mm", None) is None:
     BORDER_MM = float(_border_cfg["thickness_mm"])
 if SATIN_MAX_ARG is not None:
     SATIN_MAX_MM = float(SATIN_MAX_ARG)
@@ -132,9 +133,14 @@ else:
 if DENSITY_MM is not None:
     ROW_SPACING_MM = float(DENSITY_MM)
 
-if not 0.3 <= ROW_SPACING_MM <= 0.6:
-    print(f"warning: density {ROW_SPACING_MM} mm is outside the safe 0.3-0.6 mm range "
-          f"(too dense breaks needles, too open leaves gaps)")
+for _name, _val in [("global", ROW_SPACING_MM)] + list(_DENSITY.items()):
+    try:
+        _val = float(_val)
+    except (TypeError, ValueError):
+        continue
+    if not 0.3 <= _val <= 0.6:
+        print(f"warning: density {_val} mm ({_name}) is outside the safe 0.3-0.6 mm range "
+              f"(too dense breaks needles, too open leaves gaps)")
 
 im = Image.open(IMG).convert("RGBA")
 arr = np.array(im)
@@ -223,11 +229,17 @@ if has_transparency and not border_off:
 # interior palette (exclude the border ring so it doesn't pollute fills)
 # ---------------------------------------------------------------------------
 interior_mask = silhouette & (~border_ring if border_ring is not None else silhouette)
+if not interior_mask.any():
+    # very thin patch: the border ring swallowed the whole silhouette
+    interior_mask = silhouette
 if has_transparency:
     interior_pix = rgb[interior_mask]
 else:
     # opaque image: background handled by dropping the lightest cluster below
     interior_pix = rgb[silhouette]
+
+if len(interior_pix) == 0:
+    sys.exit("error: no opaque pixels to digitize (image is fully transparent?)")
 
 centroids = kmeans_palette(interior_pix, N_COLORS)
 cluster_rgb = centroids
@@ -295,15 +307,18 @@ def _poly_area(pts):
 
 
 def contour_paths(mask, min_area=MIN_COMP_PX, min_hole=MIN_HOLE_PX, tolerance=TOLERANCE):
-    """Return (path_d_strings, centroids, outer_point_arrays, dropped).
+    """Return (path_d_strings, centroids, outer_point_arrays, keep_lab, dropped).
 
     Components are NOT ordered here; the global emit pass orders them with the
-    needle position carried across colour layers.
+    needle position carried across colour layers.  ``keep_lab`` marks each kept
+    component with a 1-based id (parallel to the returned paths) so the emitted
+    coverage can be rasterised for the trim test.
     """
     lab, n = ndimage.label(mask)
     paths = []
     cents = []
     pts = []
+    keep_lab = np.zeros(mask.shape, dtype=np.int32)
     dropped = 0
     for c in range(1, n + 1):
         comp = (lab == c)
@@ -331,48 +346,52 @@ def contour_paths(mask, min_area=MIN_COMP_PX, min_hole=MIN_HOLE_PX, tolerance=TO
                 keep.append(polys[i])
         sub = ["M " + " L ".join(f"{x:.1f},{y:.1f}" for y, x in p) + " Z" for p in keep]
         first = np.asarray(keep[0], dtype=float)
+        keep_lab[comp] = len(paths) + 1
         paths.append(" ".join(sub))
         cents.append((float(first[:, 0].mean()), float(first[:, 1].mean())))
         pts.append(first)
-    return paths, cents, pts, dropped
+    return paths, cents, pts, keep_lab, dropped
 
 
 # ---------------------------------------------------------------------------
-# outlines -> satin: skeletonize the thin part of the darkest colour
+# outlines -> satin: skeletonize the darkest colour, classify each segment by its
+# own width, and carve the satin bands out of that colour's fill
 # ---------------------------------------------------------------------------
-lw_thin = None
+outline_items = []
+lw_cover = None
 if lw is not None and not NO_SATIN:
     lw_mask = mask_for(lw, use_border_exclusion=has_transparency)
-    r = max(1, int(round(SATIN_MAX_MM * px_per_mm / 2)))
-    thick = ndimage.binary_opening(lw_mask, structure=morphology.disk(r))
-    lw_thin = lw_mask & ~thick
-    if not lw_thin.any():
-        lw_thin = None
+    segs = satin_segments(lw_mask, px_per_mm, SATIN_MIN_LEN_MM,
+                          SATIN_MIN_MM, SATIN_MAX_MM, TOLERANCE)
+    if segs:
+        cover_img = Image.new("L", (W, H), 0)
+        cover_draw = ImageDraw.Draw(cover_img)
+        for d, poly, w in segs:
+            outline_items.append(dict(cent=(float(poly[:, 0].mean()), float(poly[:, 1].mean())),
+                                      pts=poly, d=d, satin=True, lab_id=None,
+                                      rgb=cluster_rgb[lw], spacing=None, width_px=w))
+            cover_draw.line([(float(x), float(y)) for y, x in poly], fill=255,
+                            width=max(1, int(round(w))), joint="curve")
+        lw_cover = (np.array(cover_img) > 0) & lw_mask
+        print(f"satin outlines: {len(outline_items)} segments from {tuple(cluster_rgb[lw])}")
 
 # ---------------------------------------------------------------------------
 # collect every stitched object, then order it globally (needle-aware)
 # ---------------------------------------------------------------------------
 print("fills:")
 color_items = {}
+color_keep_lab = {}
 for c in fill_colors:
     mask = mask_for(c, use_border_exclusion=has_transparency)
-    if c == lw and lw_thin is not None:
-        mask = mask & ~lw_thin
-    paths, cents, pts, dropped = contour_paths(mask)
-    items = [dict(cent=cents[i], pts=pts[i], d=paths[i], satin=False,
+    if c == lw and lw_cover is not None:
+        mask = mask & ~lw_cover
+    paths, cents, pts, keep_lab, dropped = contour_paths(mask)
+    items = [dict(cent=cents[i], pts=pts[i], d=paths[i], satin=False, lab_id=i + 1,
                   rgb=cluster_rgb[c], spacing=_DENSITY.get(hexkey(c)), width_px=None)
              for i in range(len(paths))]
     color_items[c] = items
+    color_keep_lab[c] = keep_lab
     print(f"  {tuple(cluster_rgb[c])}: {len(paths)} comps (dropped {dropped})")
-
-outline_items = []
-if lw_thin is not None:
-    for d, poly, w in satin_segments(lw_thin, px_per_mm, SATIN_MIN_LEN_MM,
-                                     SATIN_MIN_MM, SATIN_MAX_MM, TOLERANCE):
-        outline_items.append(dict(cent=(float(poly[:, 0].mean()), float(poly[:, 1].mean())),
-                                  pts=poly, d=d, satin=True, rgb=cluster_rgb[lw],
-                                  spacing=None, width_px=w))
-    print(f"  satin outlines: {len(outline_items)} segments from {tuple(cluster_rgb[lw])}")
 
 
 def nn_sort(items, needle):
@@ -391,33 +410,55 @@ def nn_sort(items, needle):
 
 
 objs = []
-color_layer = {}
 needle = [0.0, 0.0]
 layer_no = 0
+
+# stitch_index[y, x] = emit index of the last object covering that pixel (-1 =
+# nothing).  A jump after object i is hidden iff every sampled pixel has
+# stitch_index > i: something stitched later lies over the thread.
+stitch_index = np.full((H, W), -1, dtype=np.int32)
+
 for c in fill_colors:
     for o in nn_sort(color_items[c], needle):
         o["group_id"] = "color%d" % layer_no
         o["group_label"] = hexkey(c)
         o["layer"] = layer_no
+        o["index"] = len(objs)
+        stitch_index[color_keep_lab[c] == o["lab_id"]] = o["index"]
         objs.append(o)
         needle = o["cent"]
-    color_layer[c] = layer_no
     layer_no += 1
 
 if outline_items:
+    satin_img = Image.new("I", (W, H), -1)
+    satin_draw = ImageDraw.Draw(satin_img)
     for o in nn_sort(outline_items, needle):
         o["group_id"] = "outlines"
         o["group_label"] = "Outline"
         o["layer"] = layer_no
+        o["index"] = len(objs)
+        satin_draw.line([(float(x), float(y)) for y, x in o["pts"]], fill=o["index"],
+                        width=max(1, int(round(o["width_px"]))), joint="curve")
         objs.append(o)
         needle = o["cent"]
+    stitch_index = np.maximum(stitch_index, np.array(satin_img, dtype=np.int32))
     layer_no += 1
 
 if border_path_d is not None:
-    objs.append(dict(group_id="border", group_label="Border", layer=layer_no,
-                     cent=(float(border_pts[:, 0].mean()), float(border_pts[:, 1].mean())) if border_pts is not None else (H / 2, W / 2),
-                     pts=border_pts, d=border_path_d, satin=True, rgb=border_color,
-                     spacing=None, width_px=BORDER_PX))
+    o = dict(group_id="border", group_label="Border", layer=layer_no,
+             cent=(float(border_pts[:, 0].mean()), float(border_pts[:, 1].mean())) if border_pts is not None else (H / 2, W / 2),
+             pts=border_pts, d=border_path_d, satin=True, rgb=border_color,
+             spacing=None, width_px=BORDER_PX)
+    o["index"] = len(objs)
+    if border_ring is not None:
+        stitch_index[border_ring] = o["index"]
+    elif border_pts is not None:
+        bim = Image.new("I", (W, H), -1)
+        ring_pts = [(float(x), float(y)) for y, x in border_pts]
+        ImageDraw.Draw(bim).line(ring_pts + ring_pts[:1], fill=o["index"],
+                                 width=max(1, int(round(BORDER_PX))), joint="curve")
+        stitch_index = np.maximum(stitch_index, np.array(bim, dtype=np.int32))
+    objs.append(o)
 
 
 # ---------------------------------------------------------------------------
@@ -434,19 +475,13 @@ def gap_and_segment(a, b):
     return float(d[j]) / px_per_mm, pa[idx[j]], pb[j]
 
 
-def is_hidden(p0, p1, next_layer):
-    """True if the straight jump is covered by something stitched at/after next_layer."""
+def is_hidden(p0, p1, idx):
+    """True if the straight jump after object ``idx`` is covered by a later stitch."""
     n = max(8, int(np.hypot(*(p1 - p0)) / px_per_mm * 2))
     for t in np.linspace(0.0, 1.0, n + 2)[1:-1]:
         p = p0 + t * (p1 - p0)
         y, x = int(round(p[0])), int(round(p[1]))
-        if not (0 <= y < H and 0 <= x < W) or not silhouette[y, x]:
-            return False
-        if border_ring is not None and border_ring[y, x]:
-            continue
-        if lw_thin is not None and lw_thin[y, x]:
-            continue
-        if color_layer.get(int(label_all[y, x]), -1) < next_layer:
+        if not (0 <= y < H and 0 <= x < W) or stitch_index[y, x] <= idx:
             return False
     return True
 
@@ -461,7 +496,7 @@ if TRIM:
         d, p0, p1 = gap_and_segment(objs[i], objs[i + 1])
         if d <= TRIM_MIN_MM:
             continue
-        if d > TRIM_THRESHOLD_MM or not is_hidden(p0, p1, objs[i + 1]["layer"]):
+        if d > TRIM_THRESHOLD_MM or not is_hidden(p0, p1, i):
             trim_after[i] = True
     n_trims = sum(trim_after)
     print(f"trim: {n_trims} cuts / {len(objs)} objects (threshold {TRIM_THRESHOLD_MM} mm)")
@@ -479,8 +514,9 @@ def el(id_, fill_rgb, d, spacing=None, trim_after=False):
 def satin_el(id_, stroke_rgb, d, width_px, trim_after=False):
     hx = "#%02x%02x%02x" % tuple(int(v) for v in stroke_rgb)
     trim = 'inkstitch:trim_after="true" ' if trim_after else ""
+    pull = f'inkstitch:pull_compensation_mm="{SATIN_PULL_MM} {SATIN_PULL_MM}" ' if SATIN_PULL_MM else ""
     return (f'<path id="{id_}" style="fill:none;stroke:{hx};stroke-width:{width_px:.2f}" '
-            f'inkstitch:satin_column="true" {trim}d="{d}"/>')
+            f'inkstitch:satin_column="true" {pull}{trim}d="{d}"/>')
 
 
 p = []

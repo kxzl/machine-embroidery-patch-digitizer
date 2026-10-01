@@ -21,7 +21,7 @@ while [[ $# -gt 0 ]]; do
     *) IMG="$a" ;;
   esac
 done
-: "${IMG:?usage: run.sh [--trim] [--colors N] [--border-mm W] [--config F] <input.webp|png|jpg>}"
+: "${IMG:?usage: run.sh [--no-trim] [--colors N] [--border-mm W] [--config F] <input.webp|png|jpg>}"
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"

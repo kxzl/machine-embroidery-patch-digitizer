@@ -101,9 +101,10 @@ These live at the top of `tools/digitize/vectorize.py` and are not CLI flags
 |---|---|---|
 | `SIZE_MM` | `100` | Longest side of the finished design (mm). |
 | `ROW_SPACING_MM` | `0.4` | Fill line spacing (density). `0.35–0.45` is the safe band for 40 wt thread: `<0.3` packs the needle and breaks it, `>0.6` leaves the fabric showing through. A warning is printed outside `0.3–0.6`. |
-| `SATIN_MIN_MM` | `0.6` | Thinner outline runs are widened to at least this (satin below ~0.6 mm is unreliable). |
-| `SATIN_MAX_MM` | `2.5` | Outline-colour regions thicker than this are kept as fills, not satin. |
-| `SATIN_MIN_LEN_MM` | `1.0` | Drop outline runs shorter than this (removes specks). |
+| `SATIN_MIN_MM` | `0.6` | Thinner outline runs are widened to at least this (Ink/Stitch ignores satin below ~0.3 mm and recommends ≥1 mm). |
+| `SATIN_MAX_MM` | `2.5` | Outline-colour runs thicker than this stay fills, not satin. |
+| `SATIN_MIN_LEN_MM` | `2.0` | Drop outline runs shorter than this (removes specks/micro-segments). |
+| `SATIN_PULL_MM` | `0.2` | Satin pull compensation per side (closes the gap where satin meets its neighbours). |
 | `MIN_COMP_MM2` | `0.8` | Drop filled components smaller than this (mm²). Anything sub-mm can't be stitched cleanly. |
 | `MIN_HOLE_MM2` | `0.2` | Fill in holes smaller than this (removes unstitchable specks). |
 | `OPEN_RADIUS` / `CLOSE_RADIUS` | `1` / `2` | Morphological cleanup (px) to remove specks/spurs and close tiny gaps. |
@@ -141,14 +142,17 @@ Stitch order: fills (bottom, light→dark) → satin outlines → satin border (
 ## Notes & known caveats
 
 - **Outlines are auto-converted to satin** (skeleton centerline + local width) for
-  the darkest colour. If a design's outlines are not the darkest colour, edit the
-  `order`/`skip_colors` YAML, or disable with `--no-satin-outlines`.
-- **Pull-compensation and underlay-inset are intentionally omitted** — they made
-  the export hang (>20 min) via shapely buffering on the many-holed polygons.
-  Add them per-object in Inkscape if you need them.
+  the darkest colour: each skeleton run is classified by its own thickness, so
+  thin lines become satin and solid areas stay fills. If a design's outlines are
+  not the darkest colour, edit the `order`/`skip_colors` YAML, or disable with
+  `--no-satin-outlines`.
+- **Pull-compensation and underlay-inset are intentionally omitted for fills** —
+  they made the export hang (>20 min) via shapely buffering on the many-holed
+  polygons. Satin elements do get a small pull compensation (0.2 mm).
 - **Trimming is on by default** and cuts long *and* exposed jumps (thread not
-  covered by a later layer). It adds tie-off/tie-in lock stitches (a few % more
-  stitches) but eliminates visible jump thread. Use `--no-trim` to disable.
+  covered by a later layer). Jumps under 2 mm are never cut. It adds tie-off/tie-in
+  lock stitches (a few % more stitches) but eliminates visible jump thread.
+  Use `--no-trim` to disable.
 - **Density**: `0.4 mm` default; the script warns outside `0.3–0.6 mm`. Per-colour
   overrides go in the YAML `density:` map.
 - **Export time** scales with design complexity (a few minutes for large patches);

@@ -57,7 +57,12 @@ def trace_skeleton(skel):
 
 
 def satin_segments(thin, px_per_mm, min_len_mm, wmin_mm, wmax_mm, tolerance):
-    """Skeletonize a thin mask into (path_d, point_array, width_px) satin candidates."""
+    """Skeletonize a mask into (path_d, point_array, width_px) satin candidates.
+
+    Segments whose own median width exceeds ``wmax_mm`` are the cores of solid
+    regions, so they are skipped (they stay fills).  Thinner segments are widened
+    up to ``wmin_mm`` so Ink/Stitch registers them as satin.
+    """
     skel = morphology.skeletonize(thin)
     dist = ndimage.distance_transform_edt(thin)
     min_len = min_len_mm * px_per_mm
@@ -71,11 +76,13 @@ def satin_segments(thin, px_per_mm, min_len_mm, wmin_mm, wmax_mm, tolerance):
         seglen = float(np.hypot(*np.diff(arr, axis=0).T).sum())
         if seglen < min_len:
             continue
+        w_raw = 2.0 * float(np.median(dist[arr[:, 0].astype(int), arr[:, 1].astype(int)]))
+        if w_raw > wmax:
+            continue
         poly = measure.approximate_polygon(arr, tolerance=max(1.0, tolerance))
         if len(poly) < 2:
             poly = arr
-        w = 2.0 * float(np.median(dist[arr[:, 0].astype(int), arr[:, 1].astype(int)]))
-        w = min(max(w, wmin), wmax)
+        w = max(w_raw, wmin)
         d = "M " + " L ".join(f"{x:.1f},{y:.1f}" for y, x in poly)
         segs.append((d, poly, w))
     return segs
