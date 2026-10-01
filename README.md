@@ -45,6 +45,8 @@ flowchart LR
   <img src="docs/assets/pipeline-stages.png" alt="Pipeline stages: raster input, k-means separation, vectorize plus satin, VP3 stitch plan" width="720">
 </p>
 
+*Sample patch artwork © its respective artists — see [CREDITS.md](CREDITS.md).*
+
 ---
 
 ## Quick start
@@ -97,6 +99,12 @@ docs/
 ## Docs
 
 Full setup instructions (Python 3.13 venv + vendored Ink/Stitch), every command-line flag, tunable constants, and known caveats live in **[docs/USAGE.md](docs/USAGE.md)**.
+
+---
+
+## Credits
+
+Sample patch art comes from the [Dungeon Crawler Carl wiki](https://dungeon-crawler-carl.fandom.com/wiki/Category:Patches): Bomb & Book Burner by **u/waterkangaroo**, Skyfowl by **Waterkangaroo**, Scavenger's Daughter by **@thedustydruid**. Full details in **[CREDITS.md](CREDITS.md)**.
 
 ---
 
