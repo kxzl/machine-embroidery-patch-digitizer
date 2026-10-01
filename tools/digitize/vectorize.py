@@ -133,6 +133,9 @@ elif isinstance(_dens, dict):
             _DENSITY[str(_k).lower()] = float(_v)
         except (TypeError, ValueError):
             print(f"warning: ignoring non-numeric density {_v!r} for {_k}")
+elif _dens:
+    print(f"warning: ignoring non-numeric density {_dens!r}")
+    _DENSITY = {}
 else:
     _DENSITY = {}
 if DENSITY_MM is not None:

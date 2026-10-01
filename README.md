@@ -74,7 +74,7 @@ put on `PYTHONPATH` automatically by `run.sh` and `vectorize.py` usage below.
 | `--no-satin-outlines` | off | Keep the darkest colour entirely as fill instead of turning thin linework into satin. |
 | `--satin-max-mm W` | `2.5` | Regions of the outline colour thicker than this stay fills (not outlines). |
 | `--no-trim` | off | Trimming is **on by default**; this disables it. |
-| `--trim-mm N` | `4.0` | Cut when a jump is longer than this (mm); `0` = every object. Jumps under 2 mm are never cut. |
+| `--trim-mm N` | `4.0` | Cut a jump longer than this (mm); `0` = cut every long/exposed jump. Jumps under 2 mm are always skipped. |
 | (positional) input | — | Path to the source image (`.webp`/`.png`/`.jpg`). |
 | (positional) output | `work/design.svg` | Output SVG path. |
 
