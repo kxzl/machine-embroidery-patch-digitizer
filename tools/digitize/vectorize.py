@@ -210,10 +210,17 @@ def luma(rgb_):
 # ---------------------------------------------------------------------------
 # border detection (transparent-background patches only)
 # ---------------------------------------------------------------------------
+def _poly_area(pts):
+    """Absolute polygon area (shoelace) for a (N, 2) array of (y, x) points."""
+    ys, xs = pts[:, 0], pts[:, 1]
+    return 0.5 * np.abs(np.dot(xs, np.roll(ys, 1)) - np.dot(ys, np.roll(xs, 1)))
+
+
 border_ring = None
 border_color = None
-border_path_d = None
-border_pts = None
+border_paths = []          # one "M ... Z" per connected part of the patch
+border_pts_list = []       # matching polygons, for centroids + trim tests
+border_polys = []
 
 border_off = NO_BORDER or _border_mode == "off"
 
@@ -224,16 +231,29 @@ if has_transparency and not border_off:
     # the satin stroke (BORDER_PX wide) must be centred on the ring midline, so
     # trace the silhouette eroded by half the ring width: a stroke centred at
     # dt = BORDER_PX/2 covers exactly dt in 0..BORDER_PX, the carved ring
-    ring_px = max(2, BORDER_PX)
     half = int(round(BORDER_PX / 2))
     eroded = silhouette & (dt > half) if half > 0 else silhouette
-    contours = measure.find_contours(np.pad(eroded, 1), 0.5) if eroded.any() else []
-    if not contours:  # thin patch: erosion emptied the mask -> outer contour
-        contours = measure.find_contours(np.pad(silhouette, 1), 0.5)
-    outer = (max(contours, key=lambda c: len(c)) - 1) if contours else None
+    if not eroded.any():
+        eroded = silhouette        # thinner than the border: nothing left to erode
+
+    # Erosion can SPLIT one connected patch into several parts (a patch with a
+    # thin arm or neck survives the ring carve but not the midline trace).  Take
+    # one border per part: the fills have the whole ring carved out of them, so a
+    # part we skipped would be left with an unstitched band around it.
+    parts, n_parts = ndimage.label(eroded)
+    for i in range(1, n_parts + 1):
+        cnts = measure.find_contours(np.pad(parts == i, 1), 0.5)
+        if not cnts:
+            continue
+        # widest-area contour, not the longest: a wiggly hole can have more
+        # boundary points than the patch edge and would otherwise win
+        outer = max(cnts, key=_poly_area) - 1
+        poly = measure.approximate_polygon(outer, tolerance=TOLERANCE)
+        if len(poly) >= 3:
+            border_polys.append(poly)
 
     # the digital border sits just inside the silhouette edge
-    ring = silhouette & (dt > 0) & (dt <= ring_px)
+    ring = silhouette & (dt > 0) & (dt <= max(2, BORDER_PX))
     if force_black:
         border_color = np.array([0, 0, 0])
     elif ring.any():
@@ -244,11 +264,14 @@ if has_transparency and not border_off:
     # exclude the ring band from the interior palette whenever it exists
     border_ring = ring if ring.any() else None
 
-    if outer is not None:
-        poly = measure.approximate_polygon(outer, tolerance=TOLERANCE)
-        border_path_d = "M " + " L ".join(f"{x:.1f},{y:.1f}" for y, x in poly) + " Z"
-        border_pts = poly
-        print(f"border: color {_rgb_str(border_color)} width {BORDER_MM} mm ({len(poly)} pts)")
+    if border_polys:
+        border_color_str = _rgb_str(border_color)
+        for poly in border_polys:
+            border_paths.append("M " + " L ".join(f"{x:.1f},{y:.1f}" for y, x in poly) + " Z")
+            border_pts_list.append(poly)
+        print(f"border: color {border_color_str} width {BORDER_MM} mm "
+              f"({len(border_polys)} path{'s' if len(border_polys) > 1 else ''}, "
+              f"{sum(len(p) for p in border_polys)} pts)")
 
 
 # ---------------------------------------------------------------------------
@@ -348,12 +371,6 @@ def mask_for(c, use_border_exclusion=False):
     if CLOSE_RADIUS:
         m = ndimage.binary_closing(m, structure=morphology.disk(CLOSE_RADIUS))
     return m
-
-
-def _poly_area(pts):
-    ys = pts[:, 0]
-    xs = pts[:, 1]
-    return 0.5 * np.abs(np.dot(xs, np.roll(ys, 1)) - np.dot(ys, np.roll(xs, 1)))
 
 
 def contour_paths(mask, min_area=MIN_COMP_PX, min_hole=MIN_HOLE_PX, tolerance=TOLERANCE):
@@ -497,20 +514,19 @@ if outline_items:
     stitch_index = np.maximum(stitch_index, np.array(satin_img, dtype=np.int32))
     layer_no += 1
 
-if border_path_d is not None:
+for d_path, poly in zip(border_paths, border_pts_list):
     o = dict(group_id="border", group_label="Border",
-             cent=(float(border_pts[:, 0].mean()), float(border_pts[:, 1].mean())) if border_pts is not None else (H / 2, W / 2),
-             pts=border_pts, d=border_path_d, satin=True, rgb=border_color,
+             cent=(float(poly[:, 0].mean()), float(poly[:, 1].mean())),
+             pts=poly, d=d_path, satin=True, rgb=border_color,
              spacing=None, width_px=BORDER_PX)
     o["index"] = len(objs)
     # model the border as its actual stroke (BORDER_PX wide, centred on the
     # ring midline contour, so it covers the carved ring)
-    if border_pts is not None:
-        bim = Image.new("I", (W, H), -1)
-        ring_pts = [(float(x), float(y)) for y, x in border_pts]
-        ImageDraw.Draw(bim).line(ring_pts + ring_pts[:1], fill=o["index"],
-                                 width=max(1, int(round(BORDER_PX))), joint="curve")
-        stitch_index = np.maximum(stitch_index, np.array(bim, dtype=np.int32))
+    bim = Image.new("I", (W, H), -1)
+    ring_pts = [(float(x), float(y)) for y, x in poly]
+    ImageDraw.Draw(bim).line(ring_pts + ring_pts[:1], fill=o["index"],
+                             width=max(1, int(round(BORDER_PX))), joint="curve")
+    stitch_index = np.maximum(stitch_index, np.array(bim, dtype=np.int32))
     objs.append(o)
 
 if not objs:
@@ -526,12 +542,13 @@ def gap_and_segment(a, b):
     Returns ``(d_min, d_max, p0, p1)``.
 
     Ink/Stitch stitches every fill in its own scanline order, so where the needle
-    actually leaves object ``i`` and enters object ``i+1`` is not known here -- the
-    nearest-boundary distance ``d_min`` is only a lower bound on the thread the
-    machine travels.  ``d_max`` (the larger of the two one-sided Hausdorff
-    distances) is an upper bound on it.  The caller therefore uses ``d_min`` to
-    decide whether a jump is too short to bother cutting, and ``d_max`` to decide
-    whether it is too long to leave sewn.
+    actually leaves object ``i`` and enters object ``i+1`` is not known here.
+    ``d_min`` (nearest boundary pair) is a lower bound on the thread travelled and
+    ``d_max`` (the larger one-sided Hausdorff distance) is a deliberately
+    conservative estimate of it -- not a strict upper bound, since the true
+    exit/entry pair can exceed it, but far less optimistic than ``d_min``.  The
+    caller uses ``d_min`` to decide whether a jump is too short to bother cutting
+    and ``d_max`` to decide whether it may be too long to leave sewn.
     """
     pa, pb = a.get("pts"), b.get("pts")
     if pa is None or pb is None:
@@ -579,7 +596,7 @@ def el(id_, fill_rgb, d, spacing=None, trim_after=False):
 
 def satin_el(id_, stroke_rgb, d, width_px, trim_after=False):
     w_mm = width_px / px_per_mm
-    if w_mm < SATIN_GATE_MM:
+    if w_mm <= SATIN_GATE_MM:      # Ink/Stitch's test is strictly `>`
         # would be emitted as satin_column and then silently stitched as running
         print(f"warning: satin {id_} is {w_mm:.2f} mm wide, below Ink/Stitch's "
               f"{SATIN_GATE_MM:.1f} mm gate -- it will stitch as running stitch")

@@ -112,6 +112,6 @@ Sample patch art comes from the [Dungeon Crawler Carl wiki](https://dungeon-craw
   <a href="docs/USAGE.md"><img src="https://img.shields.io/badge/docs-USAGE.md-blue?style=flat-square" alt="Docs"></a>
   <img src="https://img.shields.io/badge/output-SVG%20%2B%20VP3-8957e5?style=flat-square" alt="Output: SVG + VP3">
   <img src="https://img.shields.io/badge/machine-Husqvarna%20%2F%20Viking-2ea44f?style=flat-square" alt="Husqvarna / Viking">
-  <img src="https://img.shields.io/badge/python-3.13-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.13">
+  <img src="https://img.shields.io/badge/python-3.13-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.13 (tested)">
   <img src="https://img.shields.io/badge/built%20on-Ink%2FStitch-f59e0b?style=flat-square" alt="Built on Ink/Stitch">
 </p>

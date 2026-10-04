@@ -41,7 +41,7 @@ Output lands in `work/` alongside the repo.
 The repo is wired for a Linux environment with **no `sudo`/`apt`**. Reproduce with:
 
 ```bash
-# Python 3.13 venv (the tested and pinned version)
+# Python 3.13 venv (the tested version; `numpy==2.2.6` below is pinned)
 python3 -m venv .venv
 
 # Ink/Stitch runtime deps (wxPython/PyGObject are NOT needed headless)
@@ -77,6 +77,7 @@ put on `PYTHONPATH` automatically by `run.sh` for the Ink/Stitch export step.
 | `--no-trim` | off | Trimming is **on by default**; this disables it. |
 | `--trim` | on | Explicitly enable trimming (already the default; also overrides `trim.enabled: false` in a YAML config). |
 | `--trim-mm N` | `4.0` | Cut a jump longer than this (mm); `0` = cut every long/exposed jump. Jumps under 2 mm are always skipped. |
+| `--config F` | — | Per-image YAML config (`order`, `skip_colors`, `density`, `border`, `trim`). CLI flags win over its values. Generate a starter with `tools/digitize/make_config.py <image>`. |
 | `--no-export` | off | `run.sh` only: stop after writing the SVG, skip the Ink/Stitch VP3 export. Not forwarded to `vectorize.py`. |
 | (positional) input | — | Path to the source image (`.webp`/`.png`/`.jpg`). |
 | (positional) output | `work/design.svg` | Output SVG path. |
