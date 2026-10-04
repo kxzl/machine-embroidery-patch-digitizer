@@ -11,7 +11,7 @@
 ## Features
 
 - **Outlines become real satin.** The darkest colour's thin regions are skeletonized and emitted as Ink/Stitch satin columns whose width follows the local line thickness; solid areas stay fills.
-- **Travel-aware stitch order.** Needle position is carried across colour layers and components (nearest-neighbour) — measured **up to ~10× less thread travel** in testing.
+- **Travel-aware stitch order.** Layer order is fixed (light → dark) and not optimised; the needle position is carried across layers so each layer's nearest-neighbour sweep starts where the previous one ended. Measured ~6% less inter-object travel on the Bomb sample (2175 mm vs 2308 mm).
 - **Smart trimming** *(on by default)*. Cuts a jump when it is long (> 4 mm) **or** exposed (not covered by a later-stitched layer); jumps under 2 mm are skipped.
 - **Safe density.** Default 0.4 mm fill spacing, with a warning outside the 0.3–0.6 mm safe band (needle-break vs. unfilled).
 - **Patch border.** Satin border auto-detected/added; fills ordered light → dark; holes preserved; per-image YAML config (`order`, `skip_colors`, `density`, `border`, `trim`).
@@ -72,7 +72,7 @@ Output lands in `work/`: `<name>.svg` (editable, opens in Inkscape) and `<name>.
 2. **Denoise + posterize** — median filter, then k-means down to `--colors` flat thread colours.
 3. **Vectorize** — each colour becomes closed `fill` regions with holes preserved (`fill-rule="evenodd"`); sub-mm specks are dropped.
 4. **Outlines → satin** — thin runs of the outline colour are skeletonized into centre lines and emitted as satin columns that widen to match the local stroke.
-5. **Order + trim** — components are sequenced by nearest-neighbour across layers, then long or exposed jumps are cut.
+5. **Order + trim** — layers keep their light → dark order; within a layer, components are swept nearest-neighbour from the carried needle position, then long or exposed jumps are cut.
 6. **Export** — the SVG is written with per-object Ink/Stitch parameters (`row_spacing_mm`, `trim_after`, `satin_column`) and converted to VP3 headlessly.
 
 ---
@@ -112,6 +112,6 @@ Sample patch art comes from the [Dungeon Crawler Carl wiki](https://dungeon-craw
   <a href="docs/USAGE.md"><img src="https://img.shields.io/badge/docs-USAGE.md-blue?style=flat-square" alt="Docs"></a>
   <img src="https://img.shields.io/badge/output-SVG%20%2B%20VP3-8957e5?style=flat-square" alt="Output: SVG + VP3">
   <img src="https://img.shields.io/badge/machine-Husqvarna%20%2F%20Viking-2ea44f?style=flat-square" alt="Husqvarna / Viking">
-  <img src="https://img.shields.io/badge/python-3.11%2B-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/python-3.13-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.13">
   <img src="https://img.shields.io/badge/built%20on-Ink%2FStitch-f59e0b?style=flat-square" alt="Built on Ink/Stitch">
 </p>

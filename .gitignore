@@ -24,3 +24,7 @@ work/
 !docs/assets/**
 !docs/*.svg
 !docs/*.png
+
+# keep committed regression-test fixtures (images/snapshots the tests compare)
+!tools/digitize/tests/
+!tools/digitize/tests/**

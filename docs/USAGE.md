@@ -41,7 +41,7 @@ Output lands in `work/` alongside the repo.
 The repo is wired for a Linux environment with **no `sudo`/`apt`**. Reproduce with:
 
 ```bash
-# Python 3.13 venv (Python 3.11+ works; 3.13 is what's here)
+# Python 3.13 venv (the tested and pinned version)
 python3 -m venv .venv
 
 # Ink/Stitch runtime deps (wxPython/PyGObject are NOT needed headless)
@@ -56,7 +56,8 @@ git clone --recurse-submodules https://github.com/inkstitch/inkstitch
 ```
 
 `tools/wxstub/` is a synthetic wx shim that lets Ink/Stitch run headless; it's
-put on `PYTHONPATH` automatically by `run.sh` and `vectorize.py` usage below.
+put on `PYTHONPATH` automatically by `run.sh` for the Ink/Stitch export step.
+`vectorize.py` imports no `wx` and does not need it.
 
 > `inkex` must be installed with `--no-deps` to skip its `PyGObject` requirement
 > (which needs a C compiler and is only used for the Inkscape GUI).
@@ -74,7 +75,9 @@ put on `PYTHONPATH` automatically by `run.sh` and `vectorize.py` usage below.
 | `--no-satin-outlines` | off | Keep the darkest colour entirely as fill instead of turning thin linework into satin. |
 | `--satin-max-mm W` | `2.5` | Regions of the outline colour thicker than this stay fills (not outlines). |
 | `--no-trim` | off | Trimming is **on by default**; this disables it. |
+| `--trim` | on | Explicitly enable trimming (already the default; also overrides `trim.enabled: false` in a YAML config). |
 | `--trim-mm N` | `4.0` | Cut a jump longer than this (mm); `0` = cut every long/exposed jump. Jumps under 2 mm are always skipped. |
+| `--no-export` | off | `run.sh` only: stop after writing the SVG, skip the Ink/Stitch VP3 export. Not forwarded to `vectorize.py`. |
 | (positional) input | — | Path to the source image (`.webp`/`.png`/`.jpg`). |
 | (positional) output | `work/design.svg` | Output SVG path. |
 
@@ -107,7 +110,7 @@ These live at the top of `tools/digitize/vectorize.py` and are not CLI flags
 |---|---|---|
 | `SIZE_MM` | `100` | Longest side of the finished design (mm). |
 | `ROW_SPACING_MM` | `0.4` | Fill line spacing (density). `0.35–0.45` is the safe band for 40 wt thread: `<0.3` packs the needle and breaks it, `>0.6` leaves the fabric showing through. A warning is printed outside `0.3–0.6`. |
-| `SATIN_MIN_MM` | `0.6` | Thinner outline runs are widened to at least this (Ink/Stitch ignores satin below ~0.3 mm and recommends ≥1 mm). |
+| `SATIN_MIN_MM` | `1.2` | Thinner outline runs are widened to at least this. Must stay above Ink/Stitch's 1.0 mm satin gate (`min_satin_stroke_width_mm` in `inkstitch/lib/utils/settings.py`): a satin narrower than that is silently stitched as running stitch. |
 | `SATIN_MAX_MM` | `2.5` | Outline-colour runs thicker than this stay fills, not satin. |
 | `SATIN_MIN_LEN_MM` | `2.0` | Drop outline runs shorter than this (removes specks/micro-segments). |
 | `SATIN_PULL_MM` | `0.2` | Satin pull compensation per side (closes the gap where satin meets its neighbours). |
@@ -133,9 +136,9 @@ These live at the top of `tools/digitize/vectorize.py` and are not CLI flags
    `--satin-max-mm`) are skeletonized into centerlines and emitted as simple
    satin columns whose width follows the local line thickness; its solid regions
    stay fills.
-5. **Order for travel**: the needle position is carried across colour layers and
-   components (nearest-neighbour), so the sequence is globally short, not just
-   short within one colour.
+5. **Order for travel**: layer order is fixed (light→dark); within each layer
+   components are swept nearest-neighbour, starting from where the previous
+   layer left the needle.
 6. **Trim**: a jump is cut when it is longer than `--trim-mm` **or** when it is
    not hidden under a later-stitched layer (an exposed jump thread).
 7. **Emit Ink/Stitch SVG** with per-object params: `row_spacing_mm` (density),

@@ -21,7 +21,7 @@ step. Do NOT improvise, do NOT skip verification.
 - Black border: `mode: auto` (fallback when no ring) | `force_black` | `off`.
   Border color fixed `#000000`.
 - Travel minimization: nearest-neighbor TSP **within each color layer only**.
-- Trim: threshold-based, jump > `trim.threshold_mm` (default 5 mm, `0` = always).
+- Trim: threshold-based, jump > `trim.threshold_mm` (default 4 mm, `0` = always).
 - Dependencies: add `pyyaml` (pure-python wheel).
 
 ## YAML schema
@@ -32,7 +32,7 @@ order:              # first = bottom/stitched first; unlisted -> default luma so
   - "#0b0806"
 skip_colors:        # never stitched
   - "#ffffff"
-density:            # per-color row_spacing_mm override (default 0.5)
+density:            # per-color row_spacing_mm override (default 0.4)
   "#0b0806": 0.4
 border:
   mode: auto        # auto | off | force_black
@@ -92,7 +92,7 @@ _border_mode = _border_cfg.get("mode", "auto")
 if _border_cfg.get("thickness_mm") is not None:
     BORDER_MM = float(_border_cfg["thickness_mm"])
 _extratrim = TRIM_MM if TRIM_MM is not None else cfg.get("trim", {}).get("threshold_mm")
-TRIM_THRESHOLD_MM = float(_extratrim) if _extratrim is not None else 5.0
+TRIM_THRESHOLD_MM = float(_extratrim) if _extratrim is not None else 4.0
 if TRIM_THRESHOLD_MM < 0:
     TRIM_THRESHOLD_MM = 0.0
 _ORDER = cfg.get("order") or []
@@ -374,10 +374,9 @@ Report output; confirm it stops before the export step.
 Create `tools/digitize/make_config.py`:
 
 - Usage: `make_config.py <image> [--colors N] [--out <name>.yaml]`
-- Reuse the k-means palette from `vectorize` logic (import the small
-  `kmeans_palette`/luma helpers by copying them in, or import vectorize and call
-  its functions — prefer copy-in to avoid side effects of running vectorize top
-  level). Detect colors over the image silhouette (transparent-aware), sort by
+- Reuse the k-means palette from `vectorize` logic by copying the small
+  `kmeans_palette`/luma helpers into `make_config.py`. Do not `import vectorize`:
+  it runs its whole body at import time (no `main()`/`__main__` guard). Detect colors over the image silhouette (transparent-aware), sort by
   luma ascending, list them in the `order:` key.
 - Write a starter YAML with `order:` (all detected colors), empty `skip_colors:`,
   `density:` (as a comment or empty), `border: {mode: auto}`, `trim: {enabled: false}`.

@@ -14,8 +14,9 @@ Common behaviours:
     stay fills
   * embroidery-aware cleanup (density 0.4 mm, drop sub-mm detail)
   * fills ordered by perceptual luma (light -> dark), outlines then border topmost
-  * the needle position is carried across colour layers and components
-    (nearest-neighbour) so travel is minimised globally, not per colour
+  * the needle position is carried across colour layers, so each layer's
+    nearest-neighbour sweep starts where the previous one ended (layer order is
+    fixed light -> dark and is not optimised)
   * a jump is trimmed when it is long OR exposed (not covered by a later stitch)
   * optional per-image YAML config (--config) for order/skip/density/border/trim
 
@@ -28,6 +29,7 @@ Usage:
 """
 import os
 import sys
+import warnings
 
 import yaml
 import numpy as np
@@ -90,7 +92,11 @@ SATIN_MAX_ARG = flag("satin-max-mm", None)
 
 SIZE_MM = 100.0            # longer side of finished design (mm)
 ROW_SPACING_MM = 0.4       # fill density: 0.35-0.45 standard; <0.3 breaks needles, >0.6 leaves gaps
-SATIN_MIN_MM = 0.6         # narrower satin than this is widened to it
+# narrower satin is widened to this.  Must stay strictly ABOVE Ink/Stitch's
+# min_satin_stroke_width_mm = 1 (inkstitch/lib/utils/settings.py): thinner strokes
+# silently render as running stitch
+SATIN_MIN_MM = 1.2
+SATIN_GATE_MM = 1.0       # Ink/Stitch's min_satin_stroke_width_mm; emit-time guard only
 SATIN_MAX_MM = 2.5         # thicker than this is kept as a fill, not an outline
 SATIN_MIN_LEN_MM = 2.0     # drop satin segments shorter than this (kills micro-segment flood)
 SATIN_PULL_MM = 0.2        # satin pull compensation per side (closes the gap at the ends)
@@ -156,11 +162,14 @@ has_transparency = bool(transparent.any())
 # px-per-mm based on actual image resolution (longer side -> SIZE_MM)
 px_per_mm = max(H, W) / SIZE_MM
 scale = 1.0 / px_per_mm
+if px_per_mm < 3.0:
+    print(f"warning: source is too coarse to stitch well ({1 / px_per_mm:.2f} mm per source pixel at "
+          f"{SIZE_MM:.0f} mm; need >= 3 px/mm). Supply a larger source image.")
 Wmm = W * scale
 Hmm = H * scale
 
-MIN_COMP_PX = int(MIN_COMP_MM2 * px_per_mm * px_per_mm)
-MIN_HOLE_PX = int(MIN_HOLE_MM2 * px_per_mm * px_per_mm)
+MIN_COMP_PX = max(1, int(MIN_COMP_MM2 * px_per_mm * px_per_mm))
+MIN_HOLE_PX = max(1, int(MIN_HOLE_MM2 * px_per_mm * px_per_mm))
 TOLERANCE = TOLERANCE_MM * px_per_mm
 BORDER_PX = BORDER_MM * px_per_mm
 
@@ -184,8 +193,14 @@ if has_transparency:
 def kmeans_palette(pixels, k):
     pix = pixels.astype(float)
     idx = np.random.default_rng(0).choice(len(pix), min(len(pix), 200000), replace=False)
-    cen, _ = kmeans2(pix[idx], k, minit="++", seed=0, iter=30)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # empty clusters / 0-division are expected on few-colour images
+        cen, _ = kmeans2(pix[idx], k, minit="++", seed=0, iter=30)
     return np.clip(cen.round().astype(int), 0, 255)
+
+
+def _rgb_str(v):
+    return "(" + ",".join(str(int(x)) for x in v) + ")"
 
 
 def luma(rgb_):
@@ -206,12 +221,19 @@ if has_transparency and not border_off:
     dt = ndimage.distance_transform_edt(silhouette)
     force_black = _border_mode == "force_black"
 
-    padded = np.pad(silhouette, 1)
-    contours = measure.find_contours(padded, 0.5)
+    # the satin stroke (BORDER_PX wide) must be centred on the ring midline, so
+    # trace the silhouette eroded by half the ring width: a stroke centred at
+    # dt = BORDER_PX/2 covers exactly dt in 0..BORDER_PX, the carved ring
+    ring_px = max(2, BORDER_PX)
+    half = int(round(BORDER_PX / 2))
+    eroded = silhouette & (dt > half) if half > 0 else silhouette
+    contours = measure.find_contours(np.pad(eroded, 1), 0.5) if eroded.any() else []
+    if not contours:  # thin patch: erosion emptied the mask -> outer contour
+        contours = measure.find_contours(np.pad(silhouette, 1), 0.5)
     outer = (max(contours, key=lambda c: len(c)) - 1) if contours else None
 
     # the digital border sits just inside the silhouette edge
-    ring = silhouette & (dt > 0) & (dt <= max(2, BORDER_PX))
+    ring = silhouette & (dt > 0) & (dt <= ring_px)
     if force_black:
         border_color = np.array([0, 0, 0])
     elif ring.any():
@@ -220,13 +242,13 @@ if has_transparency and not border_off:
         # fallback: no dark ring -> black border
         border_color = np.array([0, 0, 0])
     # exclude the ring band from the interior palette whenever it exists
-    border_ring = silhouette & (dt > 0) & (dt <= BORDER_PX) if ring.any() else None
+    border_ring = ring if ring.any() else None
 
     if outer is not None:
         poly = measure.approximate_polygon(outer, tolerance=TOLERANCE)
         border_path_d = "M " + " L ".join(f"{x:.1f},{y:.1f}" for y, x in poly) + " Z"
         border_pts = poly
-        print(f"border: color {tuple(border_color)} width {BORDER_MM} mm ({len(poly)} pts)")
+        print(f"border: color {_rgb_str(border_color)} width {BORDER_MM} mm ({len(poly)} pts)")
 
 
 # ---------------------------------------------------------------------------
@@ -249,12 +271,33 @@ if len(interior_pix) == 0:
     sys.exit("error: no opaque pixels to digitize (image is fully transparent?)")
 
 centroids = kmeans_palette(interior_pix, N_COLORS)
-cluster_rgb = centroids
 
-# assign labels for ALL pixels (including transparent) so fills are complete
+# assign every pixel to its nearest centroid.  Transparent pixels are labelled
+# too, but both consumers intersect `silhouette` first, so those labels are
+# simply discarded -- there is no need to keep them for any other reason.
 flat_all = rgb.reshape(-1, 3).astype(float)
 d2 = ((flat_all[:, None, :] - centroids[None, :, :]) ** 2).sum(axis=2)
 label_all = np.argmin(d2, axis=1).reshape(H, W)
+del d2, flat_all
+
+# k-means returns duplicate and empty clusters when the image has fewer distinct
+# colours than --colors, which leaves `order`/`skip_colors` unable to address
+# every colour (hex_to_idx can only map a hex to one index).  Collapse duplicate
+# centroids, then drop clusters nothing inside the silhouette was assigned to,
+# remapping the labels so every index below stays addressable.
+_uniq, _inv = np.unique(centroids, axis=0, return_inverse=True)
+centroids = _uniq
+label_all = _inv[label_all]
+_used = np.bincount(label_all[silhouette].ravel(), minlength=len(centroids))
+if not _used.all():
+    _keep = _used > 0
+    _remap = np.full(len(centroids), -1, dtype=np.int32)
+    _remap[_keep] = np.arange(int(_keep.sum()), dtype=np.int32)
+    label_all = _remap[label_all]
+    centroids = centroids[_keep]
+if len(centroids) < N_COLORS:
+    print(f"note: image has {len(centroids)} distinct colours, fewer than --colors {N_COLORS}")
+cluster_rgb = centroids
 
 # background cluster handling
 if not has_transparency:
@@ -265,7 +308,7 @@ else:
 
 print(f"image {W}x{H} -> {Wmm:.0f}x{Hmm:.0f} mm ({px_per_mm:.1f} px/mm), palette k={len(centroids)}")
 if bg is not None:
-    print(f"  background (skip) = {tuple(cluster_rgb[bg])}")
+    print(f"  background (skip) = {_rgb_str(cluster_rgb[bg])}")
 
 
 def hexkey(c):
@@ -342,6 +385,7 @@ def contour_paths(mask, min_area=MIN_COMP_PX, min_hole=MIN_HOLE_PX, tolerance=TO
             if len(poly) >= 3:
                 polys.append(poly)
         if not polys:
+            dropped += 1
             continue
         areas = [float(_poly_area(np.asarray(p))) for p in polys]
         order = sorted(range(len(polys)), key=lambda i: -areas[i])
@@ -356,7 +400,7 @@ def contour_paths(mask, min_area=MIN_COMP_PX, min_hole=MIN_HOLE_PX, tolerance=TO
         keep_lab[comp] = len(paths) + 1
         paths.append(" ".join(sub))
         cents.append((float(first[:, 0].mean()), float(first[:, 1].mean())))
-        pts.append(first)
+        pts.append(np.vstack([np.asarray(k, dtype=float) for k in keep]))
     return paths, cents, pts, keep_lab, dropped
 
 
@@ -383,7 +427,7 @@ if lw is not None and not NO_SATIN:
         # band-edge mismatch with the simplified skeleton leaves sub-mm slivers
         lw_cover = ndimage.binary_dilation((np.array(cover_img) > 0) & lw_mask,
                                            structure=morphology.disk(2))
-        print(f"satin outlines: {len(outline_items)} segments from {tuple(cluster_rgb[lw])}")
+        print(f"satin outlines: {len(outline_items)} segments from {_rgb_str(cluster_rgb[lw])}")
 
 # ---------------------------------------------------------------------------
 # collect every stitched object, then order it globally (needle-aware)
@@ -401,7 +445,7 @@ for c in fill_colors:
              for i in range(len(paths))]
     color_items[c] = items
     color_keep_lab[c] = keep_lab
-    print(f"  {tuple(cluster_rgb[c])}: {len(paths)} comps (dropped {dropped})")
+    print(f"  {_rgb_str(cluster_rgb[c])}: {len(paths)} comps (dropped {dropped})")
 
 
 def nn_sort(items, needle):
@@ -460,7 +504,7 @@ if border_path_d is not None:
              spacing=None, width_px=BORDER_PX)
     o["index"] = len(objs)
     # model the border as its actual stroke (BORDER_PX wide, centred on the
-    # contour), not the full ring band -- the stroke only reaches half way in
+    # ring midline contour, so it covers the carved ring)
     if border_pts is not None:
         bim = Image.new("I", (W, H), -1)
         ring_pts = [(float(x), float(y)) for y, x in border_pts]
@@ -470,21 +514,34 @@ if border_path_d is not None:
     objs.append(o)
 
 if not objs:
-    print("warning: no stitchable objects produced (single-colour image or all colours skipped?)")
+    sys.exit("error: no stitchable objects produced (single-colour image, or every colour skipped via skip_colors?)")
 
 
 # ---------------------------------------------------------------------------
 # trim: cut a jump that is long OR exposed (not hidden by a later stitch)
 # ---------------------------------------------------------------------------
 def gap_and_segment(a, b):
-    """Nearest-pair distance (mm) between two objects, plus the connecting segment."""
+    """Travel bounds (mm) between two objects, plus the nearest-boundary segment.
+
+    Returns ``(d_min, d_max, p0, p1)``.
+
+    Ink/Stitch stitches every fill in its own scanline order, so where the needle
+    actually leaves object ``i`` and enters object ``i+1`` is not known here -- the
+    nearest-boundary distance ``d_min`` is only a lower bound on the thread the
+    machine travels.  ``d_max`` (the larger of the two one-sided Hausdorff
+    distances) is an upper bound on it.  The caller therefore uses ``d_min`` to
+    decide whether a jump is too short to bother cutting, and ``d_max`` to decide
+    whether it is too long to leave sewn.
+    """
     pa, pb = a.get("pts"), b.get("pts")
     if pa is None or pb is None:
         d = float(np.hypot(a["cent"][0] - b["cent"][0], a["cent"][1] - b["cent"][1])) / px_per_mm
-        return d, np.asarray(a["cent"], float), np.asarray(b["cent"], float)
+        return d, d, np.asarray(a["cent"], float), np.asarray(b["cent"], float)
     d, idx = cKDTree(pa).query(pb)
     j = int(np.argmin(d))
-    return float(d[j]) / px_per_mm, pa[idx[j]], pb[j]
+    d_min = float(d[j]) / px_per_mm
+    d_max = max(float(d.max()), float(cKDTree(pb).query(pa)[0].max())) / px_per_mm
+    return d_min, d_max, pa[idx[j]], pb[j]
 
 
 def is_hidden(p0, p1, idx):
@@ -502,10 +559,10 @@ trim_after = [False] * len(objs)
 n_trims = 0
 if TRIM:
     for i in range(len(objs) - 1):
-        d, p0, p1 = gap_and_segment(objs[i], objs[i + 1])
-        if d <= TRIM_MIN_MM:
+        d_min, d_max, p0, p1 = gap_and_segment(objs[i], objs[i + 1])
+        if d_min <= TRIM_MIN_MM:
             continue
-        if TRIM_THRESHOLD_MM == 0 or d > TRIM_THRESHOLD_MM or not is_hidden(p0, p1, i):
+        if TRIM_THRESHOLD_MM == 0 or d_max > TRIM_THRESHOLD_MM or not is_hidden(p0, p1, i):
             trim_after[i] = True
     n_trims = sum(trim_after)
     print(f"trim: {n_trims} cuts / {len(objs)} objects (threshold {TRIM_THRESHOLD_MM} mm)")
@@ -521,6 +578,11 @@ def el(id_, fill_rgb, d, spacing=None, trim_after=False):
 
 
 def satin_el(id_, stroke_rgb, d, width_px, trim_after=False):
+    w_mm = width_px / px_per_mm
+    if w_mm < SATIN_GATE_MM:
+        # would be emitted as satin_column and then silently stitched as running
+        print(f"warning: satin {id_} is {w_mm:.2f} mm wide, below Ink/Stitch's "
+              f"{SATIN_GATE_MM:.1f} mm gate -- it will stitch as running stitch")
     hx = "#%02x%02x%02x" % tuple(int(v) for v in stroke_rgb)
     trim = 'inkstitch:trim_after="true" ' if trim_after else ""
     pull = f'inkstitch:pull_compensation_mm="{SATIN_PULL_MM} {SATIN_PULL_MM}" ' if SATIN_PULL_MM else ""

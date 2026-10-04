@@ -118,7 +118,7 @@ border:
 # Jumps shorter than 2mm are never cut, and exposed jumps are cut regardless.
 trim:
   enabled: true
-  threshold_mm: 5.0
+  threshold_mm: 4.0
 """
 
 with open(OUT, "w", encoding="utf-8") as f:
