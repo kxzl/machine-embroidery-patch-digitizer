@@ -71,9 +71,15 @@ put on `PYTHONPATH` automatically by `run.sh` for the Ink/Stitch export step.
 | `--colors N` | `5` | Number of posterized thread colors (k-means). Raise for more shading detail, lower for cleaner/bolder patches. |
 | `--border-mm W` | `2.5` | Satin border width (mm). Only applies to transparent-background images. |
 | `--no-border` | off | Don't add the satin border. |
-| `--density MM` | `0.4` | Default fill row spacing (mm). Keep in `0.3–0.6`; below breaks needles, above leaves gaps. |
+| `--density MM` | `0.4` raster / `0.3` SVG | Default fill row spacing (mm). Keep in `0.3–0.6`; below breaks needles, above leaves gaps. The SVG path defaults to `0.3` because `0.4` left the base fabric visible on the Scavenger's Daughter test. **An explicit density (CLI or YAML) overrides the `row_spacing_mm` authored on the artwork** — the Scavenger's paths ship `0.4`, which otherwise silently wins and reopens the gaps. |
 | `--no-satin-outlines` | off | Keep the darkest colour entirely as fill instead of turning thin linework into satin. |
 | `--satin-max-mm W` | `2.5` | Regions of the outline colour thicker than this stay fills (not outlines). |
+| `--size-mm N` | `100` | Longest side of the finished design (mm). Scales the design's own bounds (alpha silhouette for transparent art, non-background bbox for opaque art), not the image canvas. |
+| `--overlap-mm N` | `1.0` | SVG inputs: a later colour may overlap an earlier one by at most this much — under-colours are carved out from beneath later colours (a later colour can still cover an earlier one by up to `2 x N` where the later shape is thin). After the carve, fragments fully hidden under a later colour are dropped entirely (they were bare stubs that each cost underlay + tie stitches). `0` disables the carve. |
+| `--seam-pull-mm MM` | `0.2` | SVG inputs: thread is laid *centred* on its path, so a fill's **stitched** edge finishes half a thread width outside the drawn edge and eats the earlier colour's detail there (measured on the Scavenger's Daughter artwork: 19 % of the visible green). Pull every later colour back by this much along the colour edges so its stitched edge lands on the drawn edge. Only where a later colour abuts an earlier one — the outer silhouette and white highlights are untouched. `0` disables it. |
+| `--fill-angle DEG` | authored | SVG inputs: force this fill angle on every fill. Overrides the artist's per-path `inkstitch:angle`. |
+| `--satinize-colors HEX[,HEX]` | — | SVG inputs: turn the named colours' thin/elongated fills into satin columns (see `satinize` below). |
+| `--key-background` | off | `run.sh` only: key a flat background to alpha before digitizing (colour auto-detected from the corners). Use it for patches with a drawn border or a dark background — the transparent-patch path then detects the dark ring as the satin border. |
 | `--no-trim` | off | Trimming is **on by default**; this disables it. |
 | `--trim` | on | Explicitly enable trimming (already the default; also overrides `trim.enabled: false` in a YAML config). |
 | `--trim-mm N` | `4.0` | Cut a jump longer than this (mm); `0` = cut every long/exposed jump. Jumps under 2 mm are always skipped. |
@@ -98,6 +104,74 @@ To render a machine file to a colour stitch-plan preview:
 
 ```bash
 .venv/bin/python tools/digitize/preview.py work/out.vp3 work/out_plan.png
+# zoom into the top-left 80x60 mm of the design
+.venv/bin/python tools/digitize/preview.py work/out.vp3 work/detail.png --crop 0,0,80,60 --line-width 2
+# render stitches at their real 0.4 mm thread width (satin bands look solid)
+.venv/bin/python tools/digitize/preview.py work/out.vp3 work/plan.png --width 1600 --thread-mm 0.4
+```
+
+`--crop X0,Y0,X1,Y1` is in mm from the design's top-left corner, so the
+operator can inspect coverage and hotspots close up.
+
+`--thread-mm 0.4` draws every stitch at the width the needle actually lays
+down. Without it the preview uses 1 px hairlines: a satin band whose threads
+touch each other then reads as a dashed/broken line when zoomed in, which is a
+rendering artefact, not a coverage gap. `run.sh` writes **two** previews:
+`<name>_stitchplan.png` (1600 px, hairlines — individual stitches visible, use
+this to judge stitch layout and alignment) and `<name>_coverage.png` (1600 px,
+`--thread-mm 0.5`, the 40 wt thread's flattened width — use this to judge
+whether the fabric will show through).
+
+---
+
+## Native SVG inputs (`tools/digitize/svg_digitize.py`)
+
+When the input is an `.svg` with authored flat fills, `run.sh` dispatches to the
+native path instead of the raster one. Its extra behaviour:
+
+- **Authored satins are kept.** A path tagged `inkstitch:satin_column` with two
+  or more subpaths is emitted as a rail-based satin (the artist's `Outline`
+  layer on the Scavenger's Daughter is exactly this). If such a satin spans the
+  whole silhouette it is used as the **border** instead of a synthetic one, and
+  the fills keep their full footprint beneath it — that is what stops the base
+  fabric showing at the border. A single-subpath satin narrower than Ink/Stitch's
+  1 mm gate is widened to 1.5 mm rather than dropped.
+- **Density 0.3 mm default** (see above), `--fill-angle` and YAML `angle` /
+  `angle_cycle` for fill-direction depth.
+- **Hotspot control:** fills thinner than 1 mm or smaller than 2.5 mm² get no
+  underlay and no tie stitches (`ties="3"`); fully hidden under-colour fragments
+  are dropped after the overlap carve.
+- **Colour seam.** Thread is laid centred on its path, so a later colour's
+  *stitched* edge finishes ~half a thread width outside the geometry the artist
+  drew and covers that much of the earlier colour. `--seam-pull-mm` (default
+  `0.2`, half of a 40 wt round thread) pulls each later colour back along the
+  colour edges so the stitched edge lands on the drawn edge; the under-colour
+  keeps `overlap - seam_pull` = 0.8 mm of underlap beneath it, so the seam still
+  cannot open. Only the colour edges move: the outer silhouette and the
+  artwork's white highlights are stitched to their drawn size.
+- **`satinize`** (YAML or `--satinize-colors`) converts thin/elongated fills of
+  the listed colours into satin columns — the green centipede case. One satin
+  column per skeleton run, up to 3 parallel columns across wide sections; a
+  component is only converted when the columns cover it and do not spill far
+  outside it.
+
+```yaml
+# work/scavenger.yaml
+density: 0.3
+seam_pull_mm: 0.2      # pull a later colour back off a colour edge (see above)
+satinize:
+  colors: ["#87f70f"]
+  max_row_mm: 4.5    # widest single satin column
+  max_rows: 3        # 1-3 columns per section
+  min_coverage: 0.9  # below this the component stays a fill
+  max_overhang: 0.45
+angle_cycle:         # optional: cycle fill angles per component for depth
+  "#030503": [-30, 15, -45, 30]
+border:
+  mode: auto         # use an authored rail satin when present
+trim:
+  enabled: true
+  threshold_mm: 4.0
 ```
 
 ---
@@ -119,7 +193,7 @@ These live at the top of `tools/digitize/vectorize.py` and are not CLI flags
 | `MIN_COMP_MM2` | `0.8` | Drop filled components smaller than this (mm²). Anything sub-mm can't be stitched cleanly. |
 | `MIN_HOLE_MM2` | `0.2` | Fill in holes smaller than this (removes unstitchable specks). |
 | `OPEN_RADIUS` / `CLOSE_RADIUS` | `1` / `2` | Morphological cleanup (px) to remove specks/spurs and close tiny gaps. |
-| `TOLERANCE_MM` | `0.15` | Polygon simplification tolerance (mm) — smaller = smoother curves, bigger = fewer points. |
+| `TOLERANCE_MM` | `0.25` | Polygon simplification tolerance (mm) — smaller = smoother curves, bigger = fewer points. `0.25` measured ~1.5× faster export than `0.15` with ~0.8% fewer stitches and no visible difference (see `docs/adr/0002-export-performance.md`). |
 
 ---
 
@@ -165,7 +239,9 @@ Stitch order: fills (bottom, light→dark) → satin outlines → satin border (
   lock stitches (a few % more stitches) but eliminates visible jump thread.
   Use `--no-trim` to disable.
 - **Density**: `0.4 mm` default; the script warns outside `0.3–0.6 mm`. Per-colour
-  overrides go in the YAML `density:` map.
+  overrides go in the YAML `density:` map. A density given on the command line or
+  in the YAML *overrides* the `row_spacing_mm` authored on the artwork; with no
+  density flag the artwork's value wins.
 - **Export time** scales with design complexity (a few minutes for large patches);
   it's a CPU-bound, single-threaded conversion.
 - Machine format is **VP3** by default. Ink/Stitch can output `.dst`, `.pes`,

@@ -8,6 +8,12 @@ inkstitch/
 __pycache__/
 *.pyc
 
+# pipeline input/output folders
+input/
+output_inkstitch_svg/
+output_vp3/
+Embroidery_samples/
+
 # generated pipeline artifacts
 work/
 *.webp
