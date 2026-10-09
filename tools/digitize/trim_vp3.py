@@ -19,7 +19,13 @@ cross-stitch and is left alone; a travel move goes somewhere new and is cut.
 Usage:
     trim_vp3.py <file.vp3> [threshold_mm]
 
-Exit status 0 always; prints how many trims were inserted.
+Exit status 0 always; prints how many trims it inserted.
+
+Do not rewrite colour-block starts here.  pystitch reads every VP3 block start
+back as a JUMP at the previous block's end followed by a long STITCH to the new
+block's first point; that is how the format stores the block header, not sewn
+thread.  Moving the JUMP/COLOR_CHANGE was tried and displaced whole blocks by
+up to 11 mm on read-back (the goat's amber eyes landed on its cheek).
 """
 import math
 import sys
@@ -73,6 +79,7 @@ def doubles_back(k):
 out = []
 inserted = 0
 skipped = 0
+
 for k, stitch in enumerate(stitches):
     cmd = cmd_of(stitch)
     if cmd == pystitch.STITCH and out and not doubles_back(k - 1):
@@ -93,5 +100,5 @@ for k in range(len(stitches) - 1):
 if inserted:
     pattern.stitches = out
     pystitch.write(pattern, path)
-print(f"trim_vp3: inserted {inserted} trim(s) before moves > {threshold_mm:g} mm; "
-      f"{skipped} satin cross-stitch(es) over that length left intact")
+print(f"trim_vp3: inserted {inserted} trim(s) (untrimmed travel > {threshold_mm:g} mm; "
+      f"{skipped} satin cross-stitch(es) of that length left intact)")

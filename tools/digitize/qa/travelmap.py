@@ -107,7 +107,9 @@ def main():
                 d.line(q, fill=(80, 80, 80), width=1)
         prev = (x, y)
         prev_idx = k
-        after_trim = False
+        # a block-start JUMP (pystitch's reading of the VP3 block header) is
+        # followed by the move to the block's first point: still not sewn
+        after_trim = after_trim and c == pystitch.JUMP
     im.save(a.out)
     lens.sort()
     exposed = sum(1 for k in red_starts if not doubles_back(k))

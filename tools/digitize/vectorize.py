@@ -109,6 +109,7 @@ class Settings:
     trim_threshold_mm: float = 4.0
     row_spacing_mm: float = ROW_SPACING_MM
     no_satin: bool = False
+    satin_extend: bool = True    # outline ends tuck under the line they meet
     fill_angle: float | None = None
     angle_map: dict = field(default_factory=dict)
     density_map: dict = field(default_factory=dict)
@@ -175,9 +176,14 @@ class Border:
     off: bool = False
     ring: object = None        # bool mask of the carved ring, or None
     color: object = None       # np.array RGB, or None
-    paths: list = field(default_factory=list)      # one "M ... Z" per connected part
+    force_black: bool = False  # border.mode=force_black: snap to the darkest thread (see build_palette)
+    paths: list = field(default_factory=list)      # one "M ... Z" per satin part
     pts_list: list = field(default_factory=list)   # matching polygons (centroids + trim)
     polys: list = field(default_factory=list)
+    widths: list = field(default_factory=list)     # px satin width per path (narrow parts differ)
+    closed: list = field(default_factory=list)     # True when a path is a closed ring (normal border)
+    outline_paths: list = field(default_factory=list)   # running-stitch outlines for tiny/thin parts
+    outline_pts: list = field(default_factory=list)
 
 
 @dataclass
@@ -276,6 +282,7 @@ def build_settings(flags, cfg):
     trim_mm = flag("trim-mm", None)      # None = unset (fall back to YAML/default)
     density_mm = flag("density", None)   # None = unset (fall back to YAML/default)
     no_satin = flag("no-satin-outlines", False) is True
+    satin_extend = flag("no-satin-extend", False) is not True
     satin_max_arg = flag("satin-max-mm", None)
     size_mm = float(flag("size-mm", "100"))
     row_spacing_mm = float(profile_value("density", ROW_SPACING_MM))
@@ -416,7 +423,7 @@ def build_settings(flags, cfg):
     return Settings(
         n_colors=n_colors, colors_given=colors_given, size_mm=size_mm, no_border=no_border, border_mm=border_mm,
         border_mode=_border_mode, trim=trim, trim_threshold_mm=trim_threshold_mm,
-        row_spacing_mm=row_spacing_mm, no_satin=no_satin, fill_angle=fill_angle,
+        row_spacing_mm=row_spacing_mm, no_satin=no_satin, satin_extend=satin_extend, fill_angle=fill_angle,
         angle_map=_angle, density_map=_density, satinize_colors=satinize_colors,
         sat_max_row_mm=sat_max_row_mm, sat_max_rows=sat_max_rows,
         sat_min_coverage=sat_min_coverage, sat_max_overhang=sat_max_overhang,
@@ -649,6 +656,16 @@ def _poly_area(pts):
     return 0.5 * np.abs(np.dot(xs, np.roll(ys, 1)) - np.dot(ys, np.roll(xs, 1)))
 
 
+def _original_part(sil_lab, part):
+    """Silhouette connected component that contains ``part`` (for a part outline)."""
+    vals = sil_lab[part]
+    if vals.size == 0:
+        return part
+    counts = np.bincount(vals.ravel())
+    counts[0] = 0                       # label 0 is background
+    return sil_lab == int(counts.argmax())
+
+
 def detect_border(img, scale, settings):
     """Detect the satin border ring / colour (transparent-background patches only)."""
     W, H = img.W, img.H
@@ -673,10 +690,13 @@ def detect_border(img, scale, settings):
     # one border per part: the fills have the whole ring carved out of them, so a
     # part we skipped would be left with an unstitched band around it.
     parts, n_parts = ndimage.label(eroded)
+    sil_lab = None                               # lazily labelled, only for a part outline
     n_tiny_parts = 0
     n_thin_parts = 0
+    n_runout = 0       # parts given a running-stitch outline
     for i in range(1, n_parts + 1):
-        cnts = measure.find_contours(np.pad(parts == i, 1), 0.5)
+        part = (parts == i)
+        cnts = measure.find_contours(np.pad(part, 1), 0.5)
         if not cnts:
             continue
         # widest-area contour, not the longest: a wiggly hole can have more
@@ -685,39 +705,55 @@ def detect_border(img, scale, settings):
         poly = measure.approximate_polygon(outer, tolerance=scale.tolerance)
         if len(poly) < 3:
             continue
-        # A border loop must be long enough for the satin to stitch sensibly.
-        # A part only a few mm across survives the erosion but its 4 mm satin
-        # would be a solid knot of thread, so it keeps its plain fill instead.
+        # A border loop must be long enough for the satin to stitch sensibly,
+        # and a part thinner than the border makes its offset rails cross (which
+        # dies in Ink/Stitch's flattened_sections).  Instead of skipping such a
+        # part, give it a
+        # running-stitch outline along its edge (review.md 2.6.4).  A narrower
+        # centreline satin was tried and dropped: on blob-shaped embers it lays a
+        # bar across the middle instead of edging the part.
         perim = float(np.hypot(*np.diff(np.vstack([poly, poly[:1]]), axis=0).T).sum())
-        if perim < 3.0 * scale.border_px:
-            n_tiny_parts += 1
-            continue
-        # A thin part traced at border width makes its offset rails cross, and
-        # Ink/Stitch then dies building sections ("tuple index out of range" in
-        # flattened_sections).  Compare the part's thickness against the border:
-        # a part whose inscribed radius is under ~1x the border cannot carry a
-        # clean band, so it keeps its plain fill.
-        _inscribed = float(ndimage.distance_transform_edt(parts == i).max())
-        if _inscribed < 1.0 * scale.border_px:
-            n_thin_parts += 1
+        r_eroded = float(ndimage.distance_transform_edt(part).max())
+        too_small = perim < 3.0 * scale.border_px
+        too_thin = r_eroded < 1.0 * scale.border_px
+        if too_small or too_thin:
+            if too_small:
+                n_tiny_parts += 1
+            elif too_thin:
+                n_thin_parts += 1
+            # running-stitch outline along the part's own edge
+            n_runout += 1
+            if sil_lab is None:
+                sil_lab, _ = ndimage.label(img.silhouette)
+            comp = _original_part(sil_lab, part)
+            ocnts = measure.find_contours(np.pad(comp, 1), 0.5)
+            if ocnts:
+                opoly = measure.approximate_polygon(max(ocnts, key=_poly_area) - 1,
+                                                    tolerance=scale.tolerance)
+                if len(opoly) >= 3:
+                    border.outline_paths.append("M " + " L ".join(
+                        f"{x:.1f},{y:.1f}" for y, x in opoly) + " Z")
+                    border.outline_pts.append(opoly)
             continue
         border.polys.append(poly)
+        border.widths.append(scale.border_px)
+        border.closed.append(True)
+        border.paths.append("M " + " L ".join(f"{x:.1f},{y:.1f}" for y, x in poly) + " Z")
+        border.pts_list.append(poly)
 
     # the digital border sits just inside the silhouette edge
     ring = img.silhouette & (dt > 0) & (dt <= max(2, scale.border_px))
     if force_black:
         border.color = np.array([0, 0, 0])
+        border.force_black = True
     elif ring.any():
         border.color = kmeans_palette(img.rgb[ring], 1)[0]
     else:
         # fallback: no dark ring -> black border
         border.color = np.array([0, 0, 0])
 
-    if border.polys:
+    if border.paths:
         border_color_str = _rgb_str(border.color)
-        for poly in border.polys:
-            border.paths.append("M " + " L ".join(f"{x:.1f},{y:.1f}" for y, x in poly) + " Z")
-            border.pts_list.append(poly)
         # Carve out ONLY what the emitted satin actually covers.  A blanket
         # distance ring erases every part thinner than the border width -- the
         # detached ember specks in a flame patch are all under 4 mm -- and a
@@ -726,18 +762,19 @@ def detect_border(img, scale, settings):
         # satin guarantees carve area == covered area.
         stroke_img = Image.new("L", (W, H), 0)
         sdraw = ImageDraw.Draw(stroke_img)
-        for poly in border.polys:
-            pts_px = [(float(x), float(y)) for y, x in poly]
-            sdraw.line(pts_px + pts_px[:1], fill=255,
-                       width=max(1, int(round(scale.border_px))), joint="curve")
+        for spoly, wpx, closed in zip(border.polys, border.widths, border.closed):
+            pts_px = [(float(x), float(y)) for y, x in spoly]
+            if closed:
+                pts_px = pts_px + pts_px[:1]
+            sdraw.line(pts_px, fill=255, width=max(1, int(round(wpx))), joint="curve")
         border.ring = (np.array(stroke_img) > 0) & img.silhouette
         print(f"border: color {border_color_str} width {settings.border_mm} mm "
-              f"({len(border.polys)} path{'s' if len(border.polys) > 1 else ''}, "
+              f"({len(border.paths)} path{'s' if len(border.paths) > 1 else ''}, "
               f"{sum(len(p) for p in border.polys)} pts"
-              + (f", {n_tiny_parts} part(s) too small to border"
-                 if n_tiny_parts else "")
-              + (f", {n_thin_parts} part(s) too thin for the border width"
-                 if n_thin_parts else "") + ")")
+              + (f", {n_runout} part(s) given a running-stitch outline" if n_runout else "")
+              + (f", {n_tiny_parts} part(s) too small to border" if n_tiny_parts else "")
+              + (f", {n_thin_parts} part(s) too thin for the border width" if n_thin_parts else "")
+              + ")")
 
     return border
 
@@ -845,10 +882,26 @@ def build_palette(img, scale, border, settings):
     # snap the detected border colour to the nearest palette colour when they are
     # visually the same, so the border shares the fill's thread
     if border.color is not None:
-        _bd = np.linalg.norm(cluster_rgb.astype(float) - np.asarray(border.color, float), axis=1)
-        _bj = int(np.argmin(_bd))
-        if _bd[_bj] <= 40:
-            border.color = cluster_rgb[_bj].astype(float)
+        if border.force_black:
+            # force_black: use the darkest palette thread when it is genuinely
+            # dark (L* < 25), so the border joins that thread's colour block
+            # instead of adding a 7th (#000000) thread (review.md 2.6.1)
+            _L = color.rgb2lab(
+                np.asarray(cluster_rgb, float).reshape(1, -1, 3) / 255.0).reshape(-1, 3)[:, 0]
+            _j = int(np.argmin(_L))
+            if _L[_j] < 25.0:
+                border.color = cluster_rgb[_j].astype(float)
+                print(f"border: force_black snaps to darkest thread "
+                      f"{hexkey(cluster_rgb[_j])} (L* {_L[_j]:.1f} < 25)")
+            else:
+                border.color = np.array([0, 0, 0])
+                print(f"border: force_black keeps #000000 "
+                      f"(darkest thread {hexkey(cluster_rgb[_j])} L* {_L[_j]:.1f} >= 25)")
+        else:
+            _bd = np.linalg.norm(cluster_rgb.astype(float) - np.asarray(border.color, float), axis=1)
+            _bj = int(np.argmin(_bd))
+            if _bd[_bj] <= 40:
+                border.color = cluster_rgb[_bj].astype(float)
 
     # background cluster handling
     if not img.has_transparency:
@@ -1052,7 +1105,8 @@ def outline_satins(img, scale, masks, palette, lw, settings):
 
     lw_mask = masks[lw]
     segs = satin_segments(lw_mask, scale.px_per_mm, settings.satin_min_len_mm,
-                          settings.satin_min_mm, settings.satin_max_mm, scale.tolerance)
+                          settings.satin_min_mm, settings.satin_max_mm, scale.tolerance,
+                          extend_ends=settings.satin_extend)
     # A satin shorter than it is wide is not stitchable: its rails are shorter
     # than the zigzag travel, and Ink/Stitch then builds a section with no
     # points and dies with "tuple index out of range" in flattened_sections.
@@ -1218,18 +1272,35 @@ def order_objects(img, scale, palette, fill_colors, color_items, color_keep_lab,
         stitch_index = np.maximum(stitch_index, np.array(satin_img, dtype=np.int32))
         layer_no += 1
 
-    for d_path, poly in zip(border.paths, border.pts_list):
+    for d_path, poly, wpx, closed in zip(border.paths, border.pts_list,
+                                          border.widths, border.closed):
         o = dict(group_id="border", group_label="Border",
                  cent=(float(poly[:, 0].mean()), float(poly[:, 1].mean())),
                  pts=poly, d=d_path, satin=True, rgb=border.color,
-                 spacing=None, width_px=scale.border_px)
+                 spacing=None, width_px=wpx, closed=closed)
         o["index"] = len(objs)
-        # model the border as its actual stroke (BORDER_PX wide, centred on the
-        # ring midline contour, so it covers the carved ring)
+        # model the border as its actual stroke (wpx wide, centred on the ring
+        # midline contour, so it covers the carved ring)
         bim = Image.new("I", (W, H), -1)
         ring_pts = [(float(x), float(y)) for y, x in poly]
-        ImageDraw.Draw(bim).line(ring_pts + ring_pts[:1], fill=o["index"],
-                                 width=max(1, int(round(scale.border_px))), joint="curve")
+        if closed:
+            ring_pts = ring_pts + ring_pts[:1]
+        ImageDraw.Draw(bim).line(ring_pts, fill=o["index"],
+                                 width=max(1, int(round(wpx))), joint="curve")
+        stitch_index = np.maximum(stitch_index, np.array(bim, dtype=np.int32))
+        objs.append(o)
+
+    # running-stitch outlines along tiny/thin parts (review.md 2.6.4b): same
+    # border colour, same layer, stitched after the border satins
+    for opoly, d_path in zip(border.outline_pts, border.outline_paths):
+        o = dict(group_id="border", group_label="Border",
+                 cent=(float(opoly[:, 0].mean()), float(opoly[:, 1].mean())),
+                 pts=opoly, d=d_path, satin=False, stroke=True, rgb=border.color,
+                 spacing=None, width_px=None)
+        o["index"] = len(objs)
+        bim = Image.new("I", (W, H), -1)
+        rp = [(float(x), float(y)) for y, x in opoly]
+        ImageDraw.Draw(bim).line(rp, fill=o["index"], width=1, joint="curve")
         stitch_index = np.maximum(stitch_index, np.array(bim, dtype=np.int32))
         objs.append(o)
 
@@ -1273,18 +1344,39 @@ def is_hidden(p0, p1, idx, stitch_index, H, W, px_per_mm):
 
 
 def plan_trims(img, scale, objs, stitch_index, settings):
-    """Trim: cut a jump that is long OR exposed (not hidden by a later stitch)."""
+    """Trim: cut a jump that is long OR exposed (not hidden by a later stitch).
+
+    A jump is skipped only when it is genuinely short on both measures: the
+    nearest-boundary distance AND the worst one-sided travel are under the
+    threshold.  Using ``d_min`` alone skipped the Book Burner jump where
+    Ink/Stitch leaves a fill at a row end 0.74 mm from the next shape but enters
+    it 59.7 mm away -- the 58 mm sewn jump (review.md 2.8).  A jump at a layer
+    boundary is always cut when the next object's nearest boundary is farther
+    than ``TRIM_MIN_MM``, so no colour change or outline->border move is left
+    sewn and the trim_vp3 safety net has nothing to add.
+    """
     H, W = img.H, img.W
     trim_after = [False] * len(objs)
     n_trims = 0
     if settings.trim:
         for i in range(len(objs) - 1):
             d_min, d_max, p0, p1 = gap_and_segment(objs[i], objs[i + 1], scale.px_per_mm)
-            if d_min <= settings.trim_min_mm:
+            if settings.trim_threshold_mm == 0:
+                short = d_min <= settings.trim_min_mm
+            else:
+                short = (d_min <= settings.trim_min_mm
+                         and d_max <= settings.trim_threshold_mm)
+            if short:
                 continue
             if (settings.trim_threshold_mm == 0 or d_max > settings.trim_threshold_mm
                     or not is_hidden(p0, p1, i, stitch_index, H, W, scale.px_per_mm)):
                 trim_after[i] = True
+        for i in range(len(objs) - 1):
+            if (not trim_after[i]
+                    and objs[i]["group_id"] != objs[i + 1]["group_id"]):
+                d_min = gap_and_segment(objs[i], objs[i + 1], scale.px_per_mm)[0]
+                if d_min > settings.trim_min_mm:
+                    trim_after[i] = True
         n_trims = sum(trim_after)
         print(f"trim: {n_trims} cuts / {len(objs)} objects (threshold {settings.trim_threshold_mm} mm)")
     return trim_after, n_trims
@@ -1315,7 +1407,7 @@ def el(id_, fill_rgb, d, settings, spacing=None, trim_after=False, angle=None):
 
 
 def satin_el(id_, stroke_rgb, d, width_px, scale, settings, trim_after=False,
-             underlay=False, zigzag_mm=None):
+             underlay=False, zigzag_mm=None, border=False):
     w_mm = width_px / scale.px_per_mm
     if w_mm <= settings.satin_gate_mm:      # Ink/Stitch's test is strictly `>`
         # would be emitted as satin_column and then silently stitched as running
@@ -1330,8 +1422,22 @@ def satin_el(id_, stroke_rgb, d, width_px, scale, settings, trim_after=False,
         u = ('inkstitch:center_walk_underlay="true" inkstitch:contour_underlay="true" '
              f'inkstitch:contour_underlay_inset_mm="{settings.satin_underlay_inset_mm:g}" ')
     zz = f'inkstitch:zigzag_spacing_mm="{zigzag_mm:g}" ' if zigzag_mm else ""
+    # The border fans at tight tips (goat horn); inset the crossing stitches and
+    # split any satin stitch longer than 7 mm so the fan does not leave a long
+    # bar of thread (review.md 2.6.6)
+    bp = ('inkstitch:short_stitch_inset="20" inkstitch:max_stitch_length_mm="7" '
+          if border else "")
     return (f'<path id="{id_}" style="fill:none;stroke:{hx};stroke-width:{width_px:.2f}" '
-            f'inkstitch:satin_column="true" {pull}{u}{zz}{trim}d="{d}"/>')
+            f'inkstitch:satin_column="true" {pull}{u}{zz}{bp}{trim}d="{d}"/>')
+
+
+def run_el(id_, stroke_rgb, d, trim_after=False):
+    """Running-stitch outline in the border colour (review.md 2.6.4b)."""
+    hx = "#%02x%02x%02x" % tuple(int(v) for v in stroke_rgb)
+    trim = 'inkstitch:trim_after="true" ' if trim_after else ""
+    return (f'<path id="{id_}" style="fill:none;stroke:{hx};stroke-width:0.3" '
+            f'inkstitch:bean_stitch_repeats="1" inkstitch:running_stitch_length_mm="1.5" '
+            f'{trim}d="{d}"/>')
 
 
 def emit_svg(out, objs, trim_after, img, scale, settings):
@@ -1380,7 +1486,10 @@ def emit_svg(out, objs, trim_after, img, scale, settings):
             zigzag = settings.border_zigzag_spacing_mm if gid == "border" else None
             p.append("    " + satin_el(f"s{idx}", o["rgb"], o["d"], o["width_px"],
                                        scale, settings, trim_after=tm,
-                                       underlay=underlay, zigzag_mm=zigzag) + "\n")
+                                       underlay=underlay, zigzag_mm=zigzag,
+                                       border=(gid == "border")) + "\n")
+        elif o.get("stroke"):
+            p.append("    " + run_el(f"r{idx}", o["rgb"], o["d"], trim_after=tm) + "\n")
         else:
             p.append("    " + el(f"f{idx}", o["rgb"], o["d"], settings, spacing=o["spacing"],
                                   trim_after=tm, angle=o.get("angle")) + "\n")

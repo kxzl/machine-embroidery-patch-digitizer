@@ -71,10 +71,11 @@ put on `PYTHONPATH` automatically by `run.sh` for the Ink/Stitch export step.
 | `--colors N` | `5` | Upper bound on the number of thread colors for the automatic palette. Raise for more shading detail, lower for cleaner/bolder patches. Ignored (with a note) when a palette is pinned. |
 | `--palette HEX[,HEX...]` | — | Pin the thread colours, e.g. `--palette "#1A1A1A,#B5651D"`. Every pixel is assigned to the nearest pinned hex in CIELAB and the pinned hexes are emitted verbatim; no clustering or centroid merge runs. Pinned colours with zero pixels are dropped (with a note). CLI wins over YAML `palette:`. |
 | `--palette-mode auto\|kmeans` | `auto` | Palette used when nothing is pinned: `auto` is the S3 Lab palette (over-cluster, protected merge, anti-alias blend absorption); `kmeans` restores the legacy RGB k-means exactly. |
-| `--border-mm W` | `2.5` | Satin border width (mm). Only applies to transparent-background images. |
+| `--border-mm W` | `2.5` | Satin border width (mm). Only applies to transparent-background images. Parts too small/thin for it get a running-stitch edge in the border colour (see Border behaviour). |
 | `--no-border` | off | Don't add the satin border. |
 | `--density MM` | `0.4` raster / `0.3` SVG | Default fill row spacing (mm). Keep in `0.3–0.6`; below breaks needles, above leaves gaps. The SVG path defaults to `0.3` because `0.4` left the base fabric visible on the Scavenger's Daughter test. **An explicit density (CLI or YAML) overrides the `row_spacing_mm` authored on the artwork** — the Scavenger's paths ship `0.4`, which otherwise silently wins and reopens the gaps. |
 | `--no-satin-outlines` | off | Keep the darkest colour entirely as fill instead of turning thin linework into satin. |
+| `--no-satin-extend` | off | Outline satin ends are extended by half the local line width where they meet another line (and 0.3 mm at free ends) so junctions close; this flag restores square ends at the junction pixel. |
 | `--satin-max-mm W` | `2.5` | Regions of the outline colour thicker than this stay fills (not outlines). |
 | `--underlap-mm N` | `0.6` | Grow every fill up to N mm under the layers stitched after it (later fills, satin outlines, satin border), clipped to the silhouette. Closes the colour seams and the fill/border gap that fabric pull opens. `0` disables and reproduces the pre-underlap output byte-for-byte. |
 | `--raster-pull-mm N` | `0` | Stretch each fill N mm along its stitch-row angle (`--fill-angle` / YAML `angle` / 0), clipped to the silhouette **grown** by N, so overshooting the outer edge by N is intended. Compensates the pull that narrows a fill along its rows; this is the fast replacement for Ink/Stitch's own `pull_compensation_mm` on fills (see the caveat below). `0` disables; the vadmel profile sets `0.25`. |
@@ -89,7 +90,7 @@ put on `PYTHONPATH` automatically by `run.sh` for the Ink/Stitch export step.
 | `--background HEX` | config `fabric_color:` / `#ffffff` | `run.sh` only: canvas colour for the two previews, so white thread on white (or black on black) stays visible. `run.sh` reads `fabric_color:` from `--config` when the flag is absent. Not forwarded to `vectorize.py`. |
 | `--no-trim` | off | Trimming is **on by default**; this disables it. |
 | `--trim` | on | Explicitly enable trimming (already the default; also overrides `trim.enabled: false` in a YAML config). |
-| `--trim-mm N` | `4.0` | Cut a jump longer than this (mm); `0` = cut every long/exposed jump. Jumps under 2 mm are always skipped. |
+| `--trim-mm N` | `4.0` | Cut a jump longer than this (mm); `0` = cut every long/exposed jump. A jump is skipped only when both its nearest-boundary distance and its worst one-sided travel are under the threshold; jumps under 2 mm are always skipped. The last object of every layer is trimmed when the next object is farther than 2 mm. |
 | `--config F` | none | Per-image YAML config (`order`, `skip_colors`, `density`, `angle`, `border`, `trim`, `palette`, `palette_mode`, `profile`, `underlap_mm`, `raster_pull_mm`, `fill_underlay_skip_last`, `fill_underlay_double`, `satin_underlay`, `border_zigzag_spacing_mm`, `fabric_color`). CLI flags win over its values. Generate a starter with `tools/digitize/make_config.py <image>`, which also parses the `**Palette:**` line from `patch_descriptions/prompts/<name>.md` into `palette:` when one exists. |
 | `--no-export` | off | `run.sh` only: stop after writing the SVG, skip the Ink/Stitch VP3 export. Not forwarded to `vectorize.py`. |
 | (positional) input | — | Path to the source image (`.webp`/`.png`/`.jpg`). |
@@ -167,6 +168,20 @@ border:
 # CLI wins over the profile: density 0.4 instead of vadmel's 0.35
 tools/digitize/run.sh --profile vadmel --density 0.4 --config work/example.yaml image.png
 ```
+
+### Border behaviour (`border:` YAML / `--border-mm`)
+
+- **Colour.** `mode: force_black` uses the darkest palette thread when its CIELAB
+  L\* < 25, else `#000000`, so the satin border shares that thread's colour block
+  instead of adding an extra colour change. `mode: auto` samples the outer ring
+  and snaps to the nearest palette thread within 40 RGB units.
+- **Small/thin parts.** A part too small or too thin to carry the full border
+  width gets a running-stitch outline (`bean_stitch_repeats=1`) along its own
+  edge in the border colour. The run prints the count.
+- **Satin params.** The border satin carries `short_stitch_inset="20"` and
+  `max_stitch_length_mm="7"`, which inset the crossed stitches and split the long
+  cross-stitches where the border fans at a tight tip (a horn/claw point) instead
+  of leaving a long bar of thread.
 
 ---
 
@@ -259,7 +274,7 @@ These live at the top of `tools/digitize/vectorize.py` and are not CLI flags
 | `SATIN_MAX_MM` | `2.5` | Outline-colour runs thicker than this stay fills, not satin. |
 | `SATIN_MIN_LEN_MM` | `2.0` | Drop outline runs shorter than this (removes specks/micro-segments). |
 | `SATIN_PULL_MM` | `0.2` | Satin pull compensation per side (closes the gap where satin meets its neighbours). |
-| `TRIM_MIN_MM` | `2.0` | Jumps shorter than this are never cut, even with `--trim-mm 0`. |
+| `TRIM_MIN_MM` | `2.0` | Jumps shorter than this are never cut, even with `--trim-mm 0`. A jump is skipped only when both its nearest-boundary distance and its worst one-sided travel are under their thresholds. |
 | `MIN_COMP_MM2` | `0.8` | Drop filled components smaller than this (mm²). Anything sub-mm can't be stitched cleanly. |
 | `MIN_HOLE_MM2` | `0.2` | Fill in holes smaller than this (removes unstitchable specks). |
 | `OPEN_RADIUS` / `CLOSE_RADIUS` | `1` / `2` | Morphological cleanup (px) to remove specks/spurs and close tiny gaps. |
@@ -272,6 +287,8 @@ These live at the top of `tools/digitize/vectorize.py` and are not CLI flags
 1. **Classify the image**:
    - *Transparent background* → patch: uses the alpha channel as the silhouette,
      detects the dark outer ring as the **satin border**, and fills the interior.
+     A part too small or too thin for the full border gets a running-stitch
+     edge (see Border behaviour).
    - *Opaque* → flat art: drops the lightest cluster (paper) and treats the
      darkest cluster as **outlines** on its own top layer.
 2. **Denoise + palette**: median filter, then either assign every pixel to
@@ -291,7 +308,12 @@ These live at the top of `tools/digitize/vectorize.py` and are not CLI flags
    components are swept nearest-neighbour, starting from where the previous
    layer left the needle.
 6. **Trim**: a jump is cut when it is longer than `--trim-mm` **or** when it is
-   not hidden under a later-stitched layer (an exposed jump thread).
+   not hidden under a later-stitched layer (an exposed jump thread). A jump is
+   only skipped when it is short on **both** measures: its nearest-boundary
+   distance **and** its worst one-sided travel are under the threshold, so a fill
+   whose row end sits close to the next shape but whose row start is far away is
+   still cut. The last object of every layer (each colour, the outlines, the
+   border) is always trimmed when the next object is farther than 2 mm.
 7. **Emit Ink/Stitch SVG** with per-object params: `row_spacing_mm` (density),
    `trim_after`, and `satin_column` for outlines and border. The file carries
    `inkstitch_svg_version` 4 metadata and pins `max_stitch_length_mm="3"` /
@@ -300,7 +322,9 @@ These live at the top of `tools/digitize/vectorize.py` and are not CLI flags
    rows the legacy update used to inject.
 8. **Export** via Ink/Stitch headless CLI to `.vp3`.
 
-Stitch order: fills (bottom, light→dark) → satin outlines → satin border (top).
+Stitch order: fills (bottom, light→dark) → satin outlines → satin border (top),
+with a running-stitch edge in the border colour for parts too small/thin for the
+border satin.
 
 ---
 
