@@ -416,7 +416,7 @@ gaps ≥ 0.5 mm², red segments in travelmap. Gates for this round:
 | threads (colour blocks) | 6 (pinned) | 4–5 | 3 |
 | amber eyes present | yes | — | — |
 | pullsim uncovered | ≤ 0.4 % | ≤ 0.4 % | ≤ 0.4 % |
-| untrimmed travel > 3 mm outside satins | 0 | 0 | 0 |
+| exposed travel > 4.5 mm (regress.sh) | 0 | 0 | 0 |
 | export time | ≤ 1.5 × today | ≤ 1.5 × today | ≤ 1.5 × today |
 | no Ink/Stitch update dialog | yes | yes | yes |
 

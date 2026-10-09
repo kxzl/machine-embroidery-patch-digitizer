@@ -10,6 +10,11 @@ Usage:
     python tools/digitize/preview.py in.dst out.png --width 1200 --margin 24
     python tools/digitize/preview.py in.vp3 out.png --crop 0,0,60,40   # top-left 60x40 mm
     python tools/digitize/preview.py in.vp3 out.png --crop 40,10,80,50 --line-width 2
+    python tools/digitize/preview.py in.vp3 out.png --background 101010  # dark fabric
+
+``--background HEX`` sets the canvas colour (default ``#ffffff``, the historic
+output).  Threads whose colour is within RGB distance 60 of it get a 1 px
+contrasting outline so white thread on white (or black on black) stays visible.
 
 ``--crop X0,Y0,X1,Y1`` is in mm relative to the design's own bounding box, with
 (0,0) at the **top-left** of the design (image convention), so ``--crop 0,0,60,40``
@@ -28,6 +33,22 @@ def _rgb(thread):
     value = getattr(thread, "thread", thread) or "#000000"
     value = value.lstrip("#")
     return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def parse_background(text):
+    """'RRGGBB' or '#RRGGBB' -> (r, g, b)."""
+    value = text.strip().lstrip("#")
+    if len(value) != 6:
+        raise SystemExit("--background must be a 6-digit HEX colour, e.g. 101010")
+    try:
+        return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        raise SystemExit("--background must be a 6-digit HEX colour, e.g. 101010")
+
+
+def _near(c, bg, threshold=60):
+    """True when colour c is close enough to the background to need an outline."""
+    return sum((a - b) ** 2 for a, b in zip(c, bg)) <= threshold ** 2
 
 
 def parse_crop(text):
@@ -100,7 +121,12 @@ def render(path, out, width=900, margin=20, background=(255, 255, 255),
         point = px(s[0], s[1])
         if prev is not None:
             if cmd == pystitch.STITCH:
-                draw.line([prev, point], fill=_rgb(pattern.get_thread_or_filler(color_index)), width=stitch_width)
+                rgb = _rgb(pattern.get_thread_or_filler(color_index))
+                if _near(rgb, background):
+                    # thread would disappear into the canvas; outline it first
+                    outline = (0, 0, 0) if sum(rgb) > 3 * 128 else (255, 255, 255)
+                    draw.line([prev, point], fill=outline, width=stitch_width + 2)
+                draw.line([prev, point], fill=rgb, width=stitch_width)
             elif cmd == pystitch.JUMP:
                 draw.line([prev, point], fill=jump_color, width=line_width)
         if cmd in (pystitch.JUMP, pystitch.TRIM, pystitch.STOP):
@@ -125,8 +151,12 @@ def main():
     ap.add_argument("--thread-mm", type=float, default=0.0, dest="thread_mm",
                     help="draw stitches at this real thread width in mm (default: "
                          "off, 1 px hairlines); 0.4 shows satin bands as solid")
+    ap.add_argument("--background", default="#ffffff",
+                    help="canvas colour as HEX (default ffffff); thread within RGB "
+                         "distance 60 gets a contrasting outline so it stays visible")
     args = ap.parse_args()
     w, h = render(args.input, args.output, width=args.width, margin=args.margin,
+                  background=parse_background(args.background),
                   crop=parse_crop(args.crop) if args.crop else None,
                   line_width=args.line_width, thread_mm=args.thread_mm)
     print(f"wrote {args.output} ({w}x{h})")

@@ -10,6 +10,8 @@
 #   --seam-pull-mm MM  (svg inputs: pull a later colour back off a colour edge so
 #                   its thread finishes on the drawn edge; default 0.2)
 #   --fill-angle DEG | --satinize-colors HEX[,HEX]  (both paths)
+#   --background HEX  (preview canvas colour; default: --config's fabric_color:,
+#                      else white)
 #   --no-export   (skip the Ink/Stitch VP3 export, produce SVG only)
 set -euo pipefail
 
@@ -17,11 +19,17 @@ FLAGS=()
 IMG=""
 NO_EXPORT=0
 KEY_BG=0
+BACKGROUND=""
+CONFIG=""
 while [[ $# -gt 0 ]]; do
   a="$1"; shift
   case "$a" in
+    --background) BACKGROUND="$1"; shift ;;
+    --background=*) BACKGROUND="${a#*=}" ;;
+    --config) CONFIG="$1"; FLAGS+=("$a" "$1"); shift ;;
+    --config=*) CONFIG="${a#*=}"; FLAGS+=("$a") ;;
     --*=*) FLAGS+=("$a") ;;
-    --config|--colors|--border-mm|--trim-mm|--density|--satin-max-mm|--size-mm|\
+    --colors|--border-mm|--trim-mm|--density|--satin-max-mm|--size-mm|\
     --overlap-mm|--seam-pull-mm|--width-mm|--height-mm|--border-color|--skip-colors|\
     --fill-angle|--satinize-colors)
       FLAGS+=("$a" "$1"); shift ;;
@@ -35,6 +43,24 @@ done
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
+
+# preview canvas colour: --background wins, else the config's fabric_color:
+if [[ -z "$BACKGROUND" && -n "$CONFIG" ]]; then
+  BACKGROUND="$(.venv/bin/python - "$CONFIG" <<'PY'
+import sys
+try:
+    import yaml
+    cfg = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
+except Exception:
+    cfg = {}
+print((cfg.get("fabric_color") or "").strip())
+PY
+)"
+fi
+PREVIEW_BG=()
+if [[ -n "$BACKGROUND" ]]; then
+  PREVIEW_BG=(--background "$BACKGROUND")
+fi
 
 BASE="$(basename "$IMG")"
 BASE="${BASE%.webp}"; BASE="${BASE%.png}"; BASE="${BASE%.jpg}"; BASE="${BASE%.jpeg}"; BASE="${BASE%.svg}"
@@ -117,8 +143,8 @@ echo "== stitch plan"
 # 1 px hairlines a satin band reads as a dashed line, at 0.5 mm it reads as a
 # solid mass -- neither alone tells the whole story.
 .venv/bin/python tools/digitize/preview.py "output_vp3/$BASE.vp3" \
-  "output_vp3/${BASE}_stitchplan.png" --width 1600 --line-width 1
+  "output_vp3/${BASE}_stitchplan.png" --width 1600 --line-width 1 "${PREVIEW_BG[@]}"
 .venv/bin/python tools/digitize/preview.py "output_vp3/$BASE.vp3" \
-  "output_vp3/${BASE}_coverage.png" --width 1600 --thread-mm 0.5
+  "output_vp3/${BASE}_coverage.png" --width 1600 --thread-mm 0.5 "${PREVIEW_BG[@]}"
 
 echo "== done: $OUT_SVG and output_vp3/$BASE.vp3"

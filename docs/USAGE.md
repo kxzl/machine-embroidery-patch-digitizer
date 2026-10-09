@@ -80,6 +80,7 @@ put on `PYTHONPATH` automatically by `run.sh` for the Ink/Stitch export step.
 | `--fill-angle DEG` | authored | SVG inputs: force this fill angle on every fill. Overrides the artist's per-path `inkstitch:angle`. |
 | `--satinize-colors HEX[,HEX]` | — | SVG inputs: turn the named colours' thin/elongated fills into satin columns (see `satinize` below). |
 | `--key-background` | off | `run.sh` only: key a flat background to alpha before digitizing (colour auto-detected from the corners). Use it for patches with a drawn border or a dark background — the transparent-patch path then detects the dark ring as the satin border. |
+| `--background HEX` | config `fabric_color:` / `#ffffff` | `run.sh` only: canvas colour for the two previews, so white thread on white (or black on black) stays visible. `run.sh` reads `fabric_color:` from `--config` when the flag is absent. Not forwarded to `vectorize.py`. |
 | `--no-trim` | off | Trimming is **on by default**; this disables it. |
 | `--trim` | on | Explicitly enable trimming (already the default; also overrides `trim.enabled: false` in a YAML config). |
 | `--trim-mm N` | `4.0` | Cut a jump longer than this (mm); `0` = cut every long/exposed jump. Jumps under 2 mm are always skipped. |
@@ -120,7 +121,32 @@ rendering artefact, not a coverage gap. `run.sh` writes **two** previews:
 `<name>_stitchplan.png` (1600 px, hairlines — individual stitches visible, use
 this to judge stitch layout and alignment) and `<name>_coverage.png` (1600 px,
 `--thread-mm 0.5`, the 40 wt thread's flattened width — use this to judge
-whether the fabric will show through).
+whether the fabric will show through). Both are drawn on the `--background`
+colour.
+
+---
+
+## QA tools (`tools/digitize/qa/`)
+
+Instruments for measuring a raster-path SVG/VP3 instead of eyeballing it. All
+are repo-relative, take `--help`, and are what the regression gate below runs.
+Full definitions and known artefacts are in their module docstrings.
+
+| Script | Measures | Known artefact / use |
+|---|---|---|
+| `qa/pullsim.py <design.svg> <keyed.png>` | Simulates fabric pull: erodes each fill along its stitch angle by 0.25 mm/side (minus its own pull comp) and draws satins 0.15 mm narrower/side; reports silhouette pixels with no thread, and gaps ≥ 0.1/0.5 mm². | The only metric that reproduces the colour-seam defect. Thin-rectangle even-odd artefact ≈ 0.1–0.2 % floor; judge by gaps ≥ 0.5 mm². |
+| `qa/coverage.py <vp3> <keyed.png> <size_mm>` | Stitched coverage of the silhouette from the VP3 (bbox-centre aligned, closes sub-0.3 mm row pinstripes). | Reports ~0 % for everything at pull 0 — use it only as a "nothing is grossly missing" gate. |
+| `qa/travelmap.py <vp3> <out.png>` | Draws trimmed travel (cyan) and untrimmed moves > 5 mm (red); prints **exposed travel** = red moves that are not satin cross-stitches. | Red satin fans at tips are legitimate; exposed travel is the number that must be 0. `--red-mm` lowers the threshold. |
+| `qa/export.sh <svg>` | Ink/Stitch export + stats (stitches, trims, colour changes, thread m, untrimmed > 8 mm) + both previews. | Writes next to the SVG. |
+| `qa/regress.sh <outdir> [--vectorize PATH]` | Runs the three reference designs (book burner, goat, earth) end to end and prints one markdown table row each: stitches, colour blocks, trims, export s, pullsim uncovered %, pullsim gaps ≥ 0.5 mm², exposed travel > 3 mm, palette. | `--vectorize` points at a baseline copy; `REGRESS_EXTRA` appends flags to every vectorize call. |
+
+```bash
+# quick seam check on one design
+.venv/bin/python tools/digitize/qa/pullsim.py /tmp/q/bb.svg work/bb_keyed.png --out /tmp/q/bb_pull.png
+
+# full regression gate
+tools/digitize/qa/regress.sh /tmp/q
+```
 
 ---
 

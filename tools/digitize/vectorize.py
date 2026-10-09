@@ -31,6 +31,7 @@ Usage:
 import os
 import sys
 import warnings
+from dataclasses import dataclass, field
 
 import yaml
 import numpy as np
@@ -46,55 +47,9 @@ from skeleton import satin_segments
 
 _VALUE_FLAGS = {"--colors", "--border-mm", "--trim-mm", "--config", "--density",
                 "--satin-max-mm", "--size-mm", "--fill-angle", "--satinize-colors"}
-_argc = sys.argv[1:]
-args = []
-_flags = {}
-_i = 0
-while _i < len(_argc):
-    _a = _argc[_i]
-    if _a.startswith("--"):
-        if "=" in _a:
-            _name, _val = _a[2:].split("=", 1)
-            _flags[_name] = _val
-        elif _a in _VALUE_FLAGS and _i + 1 < len(_argc) and not _argc[_i + 1].startswith("--"):
-            _flags[_a[2:]] = _argc[_i + 1]
-            _i += 1
-        else:
-            _flags[_a[2:]] = True
-    elif _a.startswith("-") and _a != "-":
-        pass  # ignore short flags
-    else:
-        args.append(_a)
-    _i += 1
 
-IMG = args[0] if len(args) > 0 else "Scavenger's_Daughter_by_the_dusty_druid.webp"
-OUT = args[1] if len(args) > 1 else "work/design.svg"
-os.makedirs(os.path.dirname(OUT) or ".", exist_ok=True)
-
-
-def flag(name, default):
-    return _flags.get(name, default)
-
-
-def load_config(path):
-    if not path or not os.path.exists(path):
-        return {}
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
-
-
-N_COLORS = int(flag("colors", "5"))
-NO_BORDER = flag("no-border", False) is True
-BORDER_MM = float(flag("border-mm", "2.5"))
-NO_TRIM = flag("no-trim", False) is True
-TRIM = not NO_TRIM                   # cut long/exposed jumps (default on, machine-ready)
-CONFIG = flag("config", None)
-TRIM_MM = flag("trim-mm", None)      # None = unset (fall back to YAML/default)
-DENSITY_MM = flag("density", None)   # None = unset (fall back to YAML/default)
-NO_SATIN = flag("no-satin-outlines", False) is True
-SATIN_MAX_ARG = flag("satin-max-mm", None)
-
-SIZE_MM = float(flag("size-mm", "100"))   # longer side of finished design (mm)
+# module-level defaults (docs reference these names); build_settings resolves the
+# per-run values into a Settings instance.
 ROW_SPACING_MM = 0.4       # fill density: 0.35-0.45 standard; <0.3 breaks needles, >0.6 leaves gaps
 # narrower satin is widened to this.  Must stay strictly ABOVE Ink/Stitch's
 # min_satin_stroke_width_mm = 1 (inkstitch/lib/utils/settings.py): thinner strokes
@@ -113,155 +68,308 @@ TOLERANCE_MM = 0.25        # polygon simplification (mm); 0.25 measured 1.5x fas
                            # difference (docs/adr/0002-export-performance.md)
 TRIM_MIN_MM = 2.0          # never cut jumps shorter than this (Ink/Stitch adds no locks below ~3 mm)
 
-# --- per-image YAML overrides (CLI always wins) -------------------------------
-cfg = load_config(CONFIG)
-if flag("trim", False) is True:
-    TRIM = True
-_trim_cfg = cfg.get("trim") or {}
-if "enabled" in _trim_cfg and flag("trim", False) is not True and not NO_TRIM:
-    TRIM = bool(_trim_cfg["enabled"])
-if cfg.get("satin_outlines") is False and not flag("no-satin-outlines", False):
-    NO_SATIN = True
-_border_cfg = (cfg.get("border") or {})
-_border_mode = _border_cfg.get("mode", "auto")
-if _border_cfg.get("thickness_mm") is not None and flag("border-mm", None) is None:
-    BORDER_MM = float(_border_cfg["thickness_mm"])
-if SATIN_MAX_ARG is not None:
-    SATIN_MAX_MM = float(SATIN_MAX_ARG)
-_extratrim = TRIM_MM if TRIM_MM is not None else (cfg.get("trim") or {}).get("threshold_mm")
-TRIM_THRESHOLD_MM = float(_extratrim) if _extratrim is not None else 4.0
-if TRIM_THRESHOLD_MM < 0:
-    TRIM_THRESHOLD_MM = 0.0
-_ORDER = cfg.get("order") or []
-_SKIP = {str(s).lower() for s in (cfg.get("skip_colors") or [])}
-_dens = cfg.get("density") or {}
-if isinstance(_dens, (int, float)):
-    ROW_SPACING_MM = float(_dens)
-    _DENSITY = {}
-elif isinstance(_dens, dict):
-    _DENSITY = {}
-    for _k, _v in _dens.items():
-        try:
-            _DENSITY[str(_k).lower()] = float(_v)
-        except (TypeError, ValueError):
-            print(f"warning: ignoring non-numeric density {_v!r} for {_k}")
-elif _dens:
-    print(f"warning: ignoring non-numeric density {_dens!r}")
-    _DENSITY = {}
-else:
-    _DENSITY = {}
-if DENSITY_MM is not None:
-    ROW_SPACING_MM = float(DENSITY_MM)
 
-# --- fill angle: one value for every fill, or a per-colour YAML map ---------
-FILL_ANGLE = flag("fill-angle", None)
-try:
-    FILL_ANGLE = None if FILL_ANGLE is None else float(FILL_ANGLE)
-except (TypeError, ValueError):
-    print(f"warning: ignoring non-numeric --fill-angle {FILL_ANGLE!r}")
-    FILL_ANGLE = None
-_ANGLE = {}
-for _k, _v in (cfg.get("angle") or {}).items():
+@dataclass
+class Settings:
+    """Every constant and YAML/CLI-resolved value for one run."""
+    n_colors: int = 5
+    size_mm: float = 100.0     # longer side of finished design (mm)
+    no_border: bool = False
+    border_mm: float = 2.5
+    border_mode: str = "auto"
+    trim: bool = True          # cut long/exposed jumps (default on, machine-ready)
+    trim_threshold_mm: float = 4.0
+    row_spacing_mm: float = ROW_SPACING_MM
+    no_satin: bool = False
+    fill_angle: float | None = None
+    angle_map: dict = field(default_factory=dict)
+    density_map: dict = field(default_factory=dict)
+    satinize_colors: set = field(default_factory=set)
+    sat_max_row_mm: float = 4.5
+    sat_max_rows: int = 3
+    sat_min_coverage: float = 0.9
+    sat_max_overhang: float = 0.45
+    order: list = field(default_factory=list)
+    skip: set = field(default_factory=set)
+    # algorithm constants (module-level defaults, overridable per class later)
+    satin_min_mm: float = SATIN_MIN_MM
+    satin_gate_mm: float = SATIN_GATE_MM
+    satin_max_mm: float = SATIN_MAX_MM
+    satin_min_len_mm: float = SATIN_MIN_LEN_MM
+    satin_pull_mm: float = SATIN_PULL_MM
+    min_comp_mm2: float = MIN_COMP_MM2
+    min_hole_mm2: float = MIN_HOLE_MM2
+    open_radius: int = OPEN_RADIUS
+    close_radius: int = CLOSE_RADIUS
+    tolerance_mm: float = TOLERANCE_MM
+    trim_min_mm: float = TRIM_MIN_MM
+
+
+@dataclass
+class ImageData:
+    H: int
+    W: int
+    arr: np.ndarray
+    transparent: np.ndarray
+    has_transparency: bool
+    silhouette: np.ndarray
+    rgb: np.ndarray
+
+
+@dataclass
+class Scale:
+    design_w: int
+    design_h: int
+    px_per_mm: float
+    scale: float
+    Wmm: float
+    Hmm: float
+    min_comp_px: int
+    min_hole_px: int
+    tolerance: float
+    border_px: float
+
+
+@dataclass
+class Border:
+    off: bool = False
+    ring: object = None        # bool mask of the carved ring, or None
+    color: object = None       # np.array RGB, or None
+    paths: list = field(default_factory=list)      # one "M ... Z" per connected part
+    pts_list: list = field(default_factory=list)   # matching polygons (centroids + trim)
+    polys: list = field(default_factory=list)
+
+
+@dataclass
+class Palette:
+    centroids: np.ndarray      # cluster_rgb
+    label_all: np.ndarray
+    bg: object                 # background cluster index, or None
+    hex_to_idx: dict
+
+
+def parse_args(argv):
+    """Split ``argv`` into ``(flags, positional)`` (flags keyed without ``--``)."""
+    flags = {}
+    args = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith("--"):
+            if "=" in a:
+                name, val = a[2:].split("=", 1)
+                flags[name] = val
+            elif a in _VALUE_FLAGS and i + 1 < len(argv) and not argv[i + 1].startswith("--"):
+                flags[a[2:]] = argv[i + 1]
+                i += 1
+            else:
+                flags[a[2:]] = True
+        elif a.startswith("-") and a != "-":
+            pass  # ignore short flags
+        else:
+            args.append(a)
+        i += 1
+    return flags, args
+
+
+def load_config(path):
+    if not path or not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def build_settings(flags, cfg):
+    """Resolve CLI flags and YAML config into a Settings instance (CLI wins)."""
+    def flag(name, default):
+        return flags.get(name, default)
+
+    n_colors = int(flag("colors", "5"))
+    no_border = flag("no-border", False) is True
+    border_mm = float(flag("border-mm", "2.5"))
+    no_trim = flag("no-trim", False) is True
+    trim = not no_trim
+    trim_mm = flag("trim-mm", None)      # None = unset (fall back to YAML/default)
+    density_mm = flag("density", None)   # None = unset (fall back to YAML/default)
+    no_satin = flag("no-satin-outlines", False) is True
+    satin_max_arg = flag("satin-max-mm", None)
+    size_mm = float(flag("size-mm", "100"))
+    row_spacing_mm = ROW_SPACING_MM
+    satin_max_mm = SATIN_MAX_MM
+
+    # --- per-image YAML overrides (CLI always wins) ---------------------------
+    if flag("trim", False) is True:
+        trim = True
+    _trim_cfg = cfg.get("trim") or {}
+    if "enabled" in _trim_cfg and flag("trim", False) is not True and not no_trim:
+        trim = bool(_trim_cfg["enabled"])
+    if cfg.get("satin_outlines") is False and not flag("no-satin-outlines", False):
+        no_satin = True
+    _border_cfg = (cfg.get("border") or {})
+    _border_mode = _border_cfg.get("mode", "auto")
+    if _border_cfg.get("thickness_mm") is not None and flag("border-mm", None) is None:
+        border_mm = float(_border_cfg["thickness_mm"])
+    if satin_max_arg is not None:
+        satin_max_mm = float(satin_max_arg)
+    _extratrim = trim_mm if trim_mm is not None else (cfg.get("trim") or {}).get("threshold_mm")
+    trim_threshold_mm = float(_extratrim) if _extratrim is not None else 4.0
+    if trim_threshold_mm < 0:
+        trim_threshold_mm = 0.0
+    order = cfg.get("order") or []
+    skip = {str(s).lower() for s in (cfg.get("skip_colors") or [])}
+    _dens = cfg.get("density") or {}
+    if isinstance(_dens, (int, float)):
+        row_spacing_mm = float(_dens)
+        _density = {}
+    elif isinstance(_dens, dict):
+        _density = {}
+        for _k, _v in _dens.items():
+            try:
+                _density[str(_k).lower()] = float(_v)
+            except (TypeError, ValueError):
+                print(f"warning: ignoring non-numeric density {_v!r} for {_k}")
+    elif _dens:
+        print(f"warning: ignoring non-numeric density {_dens!r}")
+        _density = {}
+    else:
+        _density = {}
+    if density_mm is not None:
+        row_spacing_mm = float(density_mm)
+
+    # --- fill angle: one value for every fill, or a per-colour YAML map -------
+    fill_angle = flag("fill-angle", None)
     try:
-        _ANGLE[str(_k).lower()] = float(_v)
+        fill_angle = None if fill_angle is None else float(fill_angle)
     except (TypeError, ValueError):
-        print(f"warning: ignoring non-numeric angle {_v!r} for {_k}")
+        print(f"warning: ignoring non-numeric --fill-angle {fill_angle!r}")
+        fill_angle = None
+    _angle = {}
+    for _k, _v in (cfg.get("angle") or {}).items():
+        try:
+            _angle[str(_k).lower()] = float(_v)
+        except (TypeError, ValueError):
+            print(f"warning: ignoring non-numeric angle {_v!r} for {_k}")
 
-# --- satinize: thin/elongated fills of the listed colours -> satin columns ---
-_sat_cfg = cfg.get("satinize") or {}
-if isinstance(_sat_cfg, list):
-    _sat_cfg = {"colors": _sat_cfg}
-elif not isinstance(_sat_cfg, dict):
-    print(f"warning: ignoring non-mapping satinize {_sat_cfg!r}")
-    _sat_cfg = {}
-SATINIZE_COLORS = {str(c).lower() for c in (_sat_cfg.get("colors") or [])}
-for _s in str(flag("satinize-colors", "") or "").split(","):
-    if _s.strip():
-        SATINIZE_COLORS.add(_s.strip().lower())
-if _sat_cfg.get("enabled") is False:
-    SATINIZE_COLORS = set()
-SAT_MAX_ROW_MM = float(_sat_cfg.get("max_row_mm", 4.5))
-SAT_MAX_ROWS = int(_sat_cfg.get("max_rows", 3))
-SAT_MIN_COVERAGE = float(_sat_cfg.get("min_coverage", 0.9))
-SAT_MAX_OVERHANG = float(_sat_cfg.get("max_overhang", 0.45))
+    # --- satinize: thin/elongated fills of the listed colours -> satin columns -
+    _sat_cfg = cfg.get("satinize") or {}
+    if isinstance(_sat_cfg, list):
+        _sat_cfg = {"colors": _sat_cfg}
+    elif not isinstance(_sat_cfg, dict):
+        print(f"warning: ignoring non-mapping satinize {_sat_cfg!r}")
+        _sat_cfg = {}
+    satinize_colors = {str(c).lower() for c in (_sat_cfg.get("colors") or [])}
+    for _s in str(flag("satinize-colors", "") or "").split(","):
+        if _s.strip():
+            satinize_colors.add(_s.strip().lower())
+    if _sat_cfg.get("enabled") is False:
+        satinize_colors = set()
+    sat_max_row_mm = float(_sat_cfg.get("max_row_mm", 4.5))
+    sat_max_rows = int(_sat_cfg.get("max_rows", 3))
+    sat_min_coverage = float(_sat_cfg.get("min_coverage", 0.9))
+    sat_max_overhang = float(_sat_cfg.get("max_overhang", 0.45))
 
-for _name, _val in [("global", ROW_SPACING_MM)] + list(_DENSITY.items()):
-    if not 0.3 <= _val <= 0.6:
-        print(f"warning: density {_val} mm ({_name}) is outside the safe 0.3-0.6 mm range "
-              f"(too dense breaks needles, too open leaves gaps)")
+    for _name, _val in [("global", row_spacing_mm)] + list(_density.items()):
+        if not 0.3 <= _val <= 0.6:
+            print(f"warning: density {_val} mm ({_name}) is outside the safe 0.3-0.6 mm range "
+                  f"(too dense breaks needles, too open leaves gaps)")
 
-im = Image.open(IMG).convert("RGBA")
-arr = np.array(im)
-H, W = arr.shape[:2]
-alpha = arr[..., 3]
-transparent = alpha < 128
-has_transparency = bool(transparent.any())
+    return Settings(
+        n_colors=n_colors, size_mm=size_mm, no_border=no_border, border_mm=border_mm,
+        border_mode=_border_mode, trim=trim, trim_threshold_mm=trim_threshold_mm,
+        row_spacing_mm=row_spacing_mm, no_satin=no_satin, fill_angle=fill_angle,
+        angle_map=_angle, density_map=_density, satinize_colors=satinize_colors,
+        sat_max_row_mm=sat_max_row_mm, sat_max_rows=sat_max_rows,
+        sat_min_coverage=sat_min_coverage, sat_max_overhang=sat_max_overhang,
+        order=order, skip=skip, satin_max_mm=satin_max_mm,
+    )
 
-# px-per-mm based on the design's own bounds (longer side -> SIZE_MM).
-# For transparent artwork the design is the union of the alpha silhouette's
-# real components, not the canvas: scaling the canvas made a patch floating in
-# a large canvas come out undersized (Book Burner: 87 mm instead of 100 mm).
-# Tiny noise specks are ignored so they cannot inflate the bounds; the design
-# may legitimately consist of several disconnected parts (flames + book).
-if has_transparency:
-    _lbl, _n = ndimage.label(~transparent)
-    if _n:
-        _sizes = ndimage.sum(np.ones_like(_lbl), _lbl, index=range(1, _n + 1))
-        _cut = max(100, int(0.0001 * W * H))  # ignore noise specks
-        _keep = [i + 1 for i, s in enumerate(_sizes) if s >= _cut]
-        if _keep:
-            _ys, _xs = np.where(np.isin(_lbl, _keep))
+
+def load_image(path):
+    """Open the source image and derive the silhouette and denoised RGB."""
+    im = Image.open(path).convert("RGBA")
+    arr = np.array(im)
+    H, W = arr.shape[:2]
+    alpha = arr[..., 3]
+    transparent = alpha < 128
+    has_transparency = bool(transparent.any())
+
+    # silhouette = pixels that are part of the design (opaque, or whole image)
+    if has_transparency:
+        silhouette = ~transparent
+    else:
+        silhouette = np.ones((H, W), dtype=bool)
+
+    rgb = arr[..., :3]
+
+    # detailed painted renditions dither/speckle; denoise before quantizing so the
+    # posterization yields clean regions instead of thousands of tiny fragments.
+    if has_transparency:
+        disc = morphology.disk(3)
+        rgb = np.stack([ndimage.median_filter(rgb[..., i], footprint=disc) for i in range(3)], axis=-1)
+
+    return ImageData(H=H, W=W, arr=arr, transparent=transparent,
+                     has_transparency=has_transparency, silhouette=silhouette, rgb=rgb)
+
+
+def design_scale(img, settings):
+    """Scale so the design's own bounds (longer side) map to ``size_mm``.
+
+    For transparent artwork the design is the union of the alpha silhouette's
+    real components, not the canvas: scaling the canvas made a patch floating in
+    a large canvas come out undersized (Book Burner: 87 mm instead of 100 mm).
+    Tiny noise specks are ignored so they cannot inflate the bounds; the design
+    may legitimately consist of several disconnected parts (flames + book).
+    """
+    arr = img.arr
+    H, W = img.H, img.W
+    if img.has_transparency:
+        _lbl, _n = ndimage.label(~img.transparent)
+        if _n:
+            _sizes = ndimage.sum(np.ones_like(_lbl), _lbl, index=range(1, _n + 1))
+            _cut = max(100, int(0.0001 * W * H))  # ignore noise specks
+            _keep = [i + 1 for i, s in enumerate(_sizes) if s >= _cut]
+            if _keep:
+                _ys, _xs = np.where(np.isin(_lbl, _keep))
+                design_w = int(_xs.max() - _xs.min() + 1)
+                design_h = int(_ys.max() - _ys.min() + 1)
+            else:
+                design_w, design_h = W, H
+        else:
+            design_w, design_h = W, H
+    else:
+        # Opaque flat art: the "paper" is usually the border/corner colour.  Use the
+        # bbox of pixels that differ from it so a design drawn with a margin still
+        # scales to SIZE_MM (Earth patch: globe inscribed in a white canvas came out
+        # at 51 mm instead of 60 mm).
+        _pad = 8
+        _corners = np.concatenate([
+            arr[:_pad, :_pad, :3].reshape(-1, 3), arr[:_pad, -_pad:, :3].reshape(-1, 3),
+            arr[-_pad:, :_pad, :3].reshape(-1, 3), arr[-_pad:, -_pad:, :3].reshape(-1, 3)])
+        _bg = np.median(_corners, axis=0)
+        _fg = np.linalg.norm(arr[..., :3].astype(float) - _bg, axis=-1) > 40
+        if _fg.any():
+            _ys, _xs = np.where(_fg)
             design_w = int(_xs.max() - _xs.min() + 1)
             design_h = int(_ys.max() - _ys.min() + 1)
         else:
             design_w, design_h = W, H
-    else:
-        design_w, design_h = W, H
-else:
-    # Opaque flat art: the "paper" is usually the border/corner colour.  Use the
-    # bbox of pixels that differ from it so a design drawn with a margin still
-    # scales to SIZE_MM (Earth patch: globe inscribed in a white canvas came out
-    # at 51 mm instead of 60 mm).
-    _pad = 8
-    _corners = np.concatenate([
-        arr[:_pad, :_pad, :3].reshape(-1, 3), arr[:_pad, -_pad:, :3].reshape(-1, 3),
-        arr[-_pad:, :_pad, :3].reshape(-1, 3), arr[-_pad:, -_pad:, :3].reshape(-1, 3)])
-    _bg = np.median(_corners, axis=0)
-    _fg = np.linalg.norm(arr[..., :3].astype(float) - _bg, axis=-1) > 40
-    if _fg.any():
-        _ys, _xs = np.where(_fg)
-        design_w = int(_xs.max() - _xs.min() + 1)
-        design_h = int(_ys.max() - _ys.min() + 1)
-    else:
-        design_w, design_h = W, H
-px_per_mm = max(design_w, design_h) / SIZE_MM
-scale = 1.0 / px_per_mm
-if px_per_mm < 3.0:
-    print(f"warning: source is too coarse to stitch well ({1 / px_per_mm:.2f} mm per source pixel at "
-          f"{SIZE_MM:.0f} mm; need >= 3 px/mm). Supply a larger source image.")
-Wmm = W * scale
-Hmm = H * scale
 
-MIN_COMP_PX = max(1, int(MIN_COMP_MM2 * px_per_mm * px_per_mm))
-MIN_HOLE_PX = max(1, int(MIN_HOLE_MM2 * px_per_mm * px_per_mm))
-TOLERANCE = TOLERANCE_MM * px_per_mm
-BORDER_PX = BORDER_MM * px_per_mm
+    px_per_mm = max(design_w, design_h) / settings.size_mm
+    scale = 1.0 / px_per_mm
+    if px_per_mm < 3.0:
+        print(f"warning: source is too coarse to stitch well ({1 / px_per_mm:.2f} mm per source pixel at "
+              f"{settings.size_mm:.0f} mm; need >= 3 px/mm). Supply a larger source image.")
+    Wmm = W * scale
+    Hmm = H * scale
 
-# ---------------------------------------------------------------------------
-# silhouette = pixels that are part of the design (opaque, or whole image)
-# ---------------------------------------------------------------------------
-if has_transparency:
-    silhouette = ~transparent
-else:
-    silhouette = np.ones((H, W), dtype=bool)
-
-rgb = arr[..., :3]
-
-# detailed painted renditions dither/speckle; denoise before quantizing so the
-# posterization yields clean regions instead of thousands of tiny fragments.
-if has_transparency:
-    disc = morphology.disk(3)
-    rgb = np.stack([ndimage.median_filter(rgb[..., i], footprint=disc) for i in range(3)], axis=-1)
+    return Scale(
+        design_w=design_w, design_h=design_h, px_per_mm=px_per_mm, scale=scale,
+        Wmm=Wmm, Hmm=Hmm,
+        min_comp_px=max(1, int(settings.min_comp_mm2 * px_per_mm * px_per_mm)),
+        min_hole_px=max(1, int(settings.min_hole_mm2 * px_per_mm * px_per_mm)),
+        tolerance=settings.tolerance_mm * px_per_mm,
+        border_px=settings.border_mm * px_per_mm,
+    )
 
 
 def kmeans_palette(pixels, k):
@@ -281,34 +389,34 @@ def luma(rgb_):
     return 0.2126 * rgb_[0] + 0.7152 * rgb_[1] + 0.0722 * rgb_[2]
 
 
-# ---------------------------------------------------------------------------
-# border detection (transparent-background patches only)
-# ---------------------------------------------------------------------------
+def hexkey(rgb_):
+    return "#%02x%02x%02x" % tuple(int(v) for v in rgb_)
+
+
 def _poly_area(pts):
     """Absolute polygon area (shoelace) for a (N, 2) array of (y, x) points."""
     ys, xs = pts[:, 0], pts[:, 1]
     return 0.5 * np.abs(np.dot(xs, np.roll(ys, 1)) - np.dot(ys, np.roll(xs, 1)))
 
 
-border_ring = None
-border_color = None
-border_paths = []          # one "M ... Z" per connected part of the patch
-border_pts_list = []       # matching polygons, for centroids + trim tests
-border_polys = []
+def detect_border(img, scale, settings):
+    """Detect the satin border ring / colour (transparent-background patches only)."""
+    W, H = img.W, img.H
+    border_off = settings.no_border or settings.border_mode == "off"
+    border = Border(off=border_off)
+    if not (img.has_transparency and not border_off):
+        return border
 
-border_off = NO_BORDER or _border_mode == "off"
-
-if has_transparency and not border_off:
-    dt = ndimage.distance_transform_edt(silhouette)
-    force_black = _border_mode == "force_black"
+    dt = ndimage.distance_transform_edt(img.silhouette)
+    force_black = settings.border_mode == "force_black"
 
     # the satin stroke (BORDER_PX wide) must be centred on the ring midline, so
     # trace the silhouette eroded by half the ring width: a stroke centred at
     # dt = BORDER_PX/2 covers exactly dt in 0..BORDER_PX, the carved ring
-    half = int(round(BORDER_PX / 2))
-    eroded = silhouette & (dt > half) if half > 0 else silhouette
+    half = int(round(scale.border_px / 2))
+    eroded = img.silhouette & (dt > half) if half > 0 else img.silhouette
     if not eroded.any():
-        eroded = silhouette        # thinner than the border: nothing left to erode
+        eroded = img.silhouette        # thinner than the border: nothing left to erode
 
     # Erosion can SPLIT one connected patch into several parts (a patch with a
     # thin arm or neck survives the ring carve but not the midline trace).  Take
@@ -324,14 +432,14 @@ if has_transparency and not border_off:
         # widest-area contour, not the longest: a wiggly hole can have more
         # boundary points than the patch edge and would otherwise win
         outer = max(cnts, key=_poly_area) - 1
-        poly = measure.approximate_polygon(outer, tolerance=TOLERANCE)
+        poly = measure.approximate_polygon(outer, tolerance=scale.tolerance)
         if len(poly) < 3:
             continue
         # A border loop must be long enough for the satin to stitch sensibly.
         # A part only a few mm across survives the erosion but its 4 mm satin
         # would be a solid knot of thread, so it keeps its plain fill instead.
         perim = float(np.hypot(*np.diff(np.vstack([poly, poly[:1]]), axis=0).T).sum())
-        if perim < 3.0 * BORDER_PX:
+        if perim < 3.0 * scale.border_px:
             n_tiny_parts += 1
             continue
         # A thin part traced at border width makes its offset rails cross, and
@@ -340,26 +448,26 @@ if has_transparency and not border_off:
         # a part whose inscribed radius is under ~1x the border cannot carry a
         # clean band, so it keeps its plain fill.
         _inscribed = float(ndimage.distance_transform_edt(parts == i).max())
-        if _inscribed < 1.0 * BORDER_PX:
+        if _inscribed < 1.0 * scale.border_px:
             n_thin_parts += 1
             continue
-        border_polys.append(poly)
+        border.polys.append(poly)
 
     # the digital border sits just inside the silhouette edge
-    ring = silhouette & (dt > 0) & (dt <= max(2, BORDER_PX))
+    ring = img.silhouette & (dt > 0) & (dt <= max(2, scale.border_px))
     if force_black:
-        border_color = np.array([0, 0, 0])
+        border.color = np.array([0, 0, 0])
     elif ring.any():
-        border_color = kmeans_palette(rgb[ring], 1)[0]
+        border.color = kmeans_palette(img.rgb[ring], 1)[0]
     else:
         # fallback: no dark ring -> black border
-        border_color = np.array([0, 0, 0])
+        border.color = np.array([0, 0, 0])
 
-    if border_polys:
-        border_color_str = _rgb_str(border_color)
-        for poly in border_polys:
-            border_paths.append("M " + " L ".join(f"{x:.1f},{y:.1f}" for y, x in poly) + " Z")
-            border_pts_list.append(poly)
+    if border.polys:
+        border_color_str = _rgb_str(border.color)
+        for poly in border.polys:
+            border.paths.append("M " + " L ".join(f"{x:.1f},{y:.1f}" for y, x in poly) + " Z")
+            border.pts_list.append(poly)
         # Carve out ONLY what the emitted satin actually covers.  A blanket
         # distance ring erases every part thinner than the border width -- the
         # detached ember specks in a flame patch are all under 4 mm -- and a
@@ -368,150 +476,172 @@ if has_transparency and not border_off:
         # satin guarantees carve area == covered area.
         stroke_img = Image.new("L", (W, H), 0)
         sdraw = ImageDraw.Draw(stroke_img)
-        for poly in border_polys:
+        for poly in border.polys:
             pts_px = [(float(x), float(y)) for y, x in poly]
             sdraw.line(pts_px + pts_px[:1], fill=255,
-                       width=max(1, int(round(BORDER_PX))), joint="curve")
-        border_ring = (np.array(stroke_img) > 0) & silhouette
-        print(f"border: color {border_color_str} width {BORDER_MM} mm "
-              f"({len(border_polys)} path{'s' if len(border_polys) > 1 else ''}, "
-              f"{sum(len(p) for p in border_polys)} pts"
+                       width=max(1, int(round(scale.border_px))), joint="curve")
+        border.ring = (np.array(stroke_img) > 0) & img.silhouette
+        print(f"border: color {border_color_str} width {settings.border_mm} mm "
+              f"({len(border.polys)} path{'s' if len(border.polys) > 1 else ''}, "
+              f"{sum(len(p) for p in border.polys)} pts"
               + (f", {n_tiny_parts} part(s) too small to border"
                  if n_tiny_parts else "")
               + (f", {n_thin_parts} part(s) too thin for the border width"
                  if n_thin_parts else "") + ")")
+
+    return border
+
+
+def build_palette(img, scale, border, settings):
+    """Interior k-means palette: dedupe, merge, background pick, border-colour snap."""
+    # interior palette (exclude the border ring so it doesn't pollute fills)
+    interior_mask = img.silhouette & (~border.ring if border.ring is not None else img.silhouette)
+    if not interior_mask.any():
+        # very thin patch: the border ring swallowed the whole silhouette -> keep the
+        # interior as fills and drop the ring exclusion, otherwise everything vanishes
+        print("warning: border ring covers the whole silhouette; keeping interior as fills")
+        border.ring = None
+        interior_mask = img.silhouette
+    if img.has_transparency:
+        interior_pix = img.rgb[interior_mask]
     else:
-        border_ring = None
+        # opaque image: background handled by dropping the lightest cluster below
+        interior_pix = img.rgb[img.silhouette]
 
+    if len(interior_pix) == 0:
+        sys.exit("error: no opaque pixels to digitize (image is fully transparent?)")
 
-# ---------------------------------------------------------------------------
-# interior palette (exclude the border ring so it doesn't pollute fills)
-# ---------------------------------------------------------------------------
-interior_mask = silhouette & (~border_ring if border_ring is not None else silhouette)
-if not interior_mask.any():
-    # very thin patch: the border ring swallowed the whole silhouette -> keep the
-    # interior as fills and drop the ring exclusion, otherwise everything vanishes
-    print("warning: border ring covers the whole silhouette; keeping interior as fills")
-    border_ring = None
-    interior_mask = silhouette
-if has_transparency:
-    interior_pix = rgb[interior_mask]
-else:
-    # opaque image: background handled by dropping the lightest cluster below
-    interior_pix = rgb[silhouette]
+    centroids = kmeans_palette(interior_pix, settings.n_colors)
 
-if len(interior_pix) == 0:
-    sys.exit("error: no opaque pixels to digitize (image is fully transparent?)")
+    # assign every pixel to its nearest centroid.  Transparent pixels are labelled
+    # too, but both consumers intersect `silhouette` first, so those labels are
+    # simply discarded -- there is no need to keep them for any other reason.
+    H, W = img.H, img.W
+    flat_all = img.rgb.reshape(-1, 3).astype(float)
+    d2 = ((flat_all[:, None, :] - centroids[None, :, :]) ** 2).sum(axis=2)
+    label_all = np.argmin(d2, axis=1).reshape(H, W)
+    del d2, flat_all
 
-centroids = kmeans_palette(interior_pix, N_COLORS)
+    # k-means returns duplicate and empty clusters when the image has fewer distinct
+    # colours than --colors, which leaves `order`/`skip_colors` unable to address
+    # every colour (hex_to_idx can only map a hex to one index).  Collapse duplicate
+    # centroids, then drop clusters nothing inside the silhouette was assigned to,
+    # remapping the labels so every index below stays addressable.
+    _uniq, _inv = np.unique(centroids, axis=0, return_inverse=True)
+    centroids = _uniq
+    label_all = _inv[label_all]
+    _used = np.bincount(label_all[img.silhouette].ravel(), minlength=len(centroids))
+    if not _used.all():
+        _keep = _used > 0
+        _remap = np.full(len(centroids), -1, dtype=np.int32)
+        _remap[_keep] = np.arange(int(_keep.sum()), dtype=np.int32)
+        label_all = _remap[label_all]
+        centroids = centroids[_keep]
+    if len(centroids) < settings.n_colors:
+        print(f"note: image has {len(centroids)} distinct colours, fewer than --colors {settings.n_colors}")
 
-# assign every pixel to its nearest centroid.  Transparent pixels are labelled
-# too, but both consumers intersect `silhouette` first, so those labels are
-# simply discarded -- there is no need to keep them for any other reason.
-flat_all = rgb.reshape(-1, 3).astype(float)
-d2 = ((flat_all[:, None, :] - centroids[None, :, :]) ** 2).sum(axis=2)
-label_all = np.argmin(d2, axis=1).reshape(H, W)
-del d2, flat_all
+    # merge visually identical clusters (k-means splits near-black pixels into e.g.
+    # (0,1,1) and (2,2,2)) so the design doesn't stitch two indistinguishable
+    # threads and waste a colour change
+    _MERGE_DIST = 20.0
+    _keep = []
+    for i in range(len(centroids)):
+        for j in _keep:
+            if np.linalg.norm(centroids[i].astype(float) - centroids[j].astype(float)) < _MERGE_DIST:
+                label_all[label_all == i] = j
+                break
+        else:
+            _keep.append(i)
+    if len(_keep) < len(centroids):
+        _remap = np.full(len(centroids), -1, dtype=np.int32)
+        for _new, _old in enumerate(_keep):
+            _remap[_old] = _new
+        label_all = _remap[label_all]
+        centroids = centroids[_keep]
 
-# k-means returns duplicate and empty clusters when the image has fewer distinct
-# colours than --colors, which leaves `order`/`skip_colors` unable to address
-# every colour (hex_to_idx can only map a hex to one index).  Collapse duplicate
-# centroids, then drop clusters nothing inside the silhouette was assigned to,
-# remapping the labels so every index below stays addressable.
-_uniq, _inv = np.unique(centroids, axis=0, return_inverse=True)
-centroids = _uniq
-label_all = _inv[label_all]
-_used = np.bincount(label_all[silhouette].ravel(), minlength=len(centroids))
-if not _used.all():
-    _keep = _used > 0
-    _remap = np.full(len(centroids), -1, dtype=np.int32)
-    _remap[_keep] = np.arange(int(_keep.sum()), dtype=np.int32)
-    label_all = _remap[label_all]
-    centroids = centroids[_keep]
-if len(centroids) < N_COLORS:
-    print(f"note: image has {len(centroids)} distinct colours, fewer than --colors {N_COLORS}")
+    cluster_rgb = centroids
 
-# merge visually identical clusters (k-means splits near-black pixels into e.g.
-# (0,1,1) and (2,2,2)) so the design doesn't stitch two indistinguishable
-# threads and waste a colour change
-_MERGE_DIST = 20.0
-_keep = []
-for i in range(len(centroids)):
-    for j in _keep:
-        if np.linalg.norm(centroids[i].astype(float) - centroids[j].astype(float)) < _MERGE_DIST:
-            label_all[label_all == i] = j
-            break
+    # snap the detected border colour to the nearest palette colour when they are
+    # visually the same, so the border shares the fill's thread
+    if border.color is not None:
+        _bd = np.linalg.norm(cluster_rgb.astype(float) - np.asarray(border.color, float), axis=1)
+        _bj = int(np.argmin(_bd))
+        if _bd[_bj] <= 40:
+            border.color = cluster_rgb[_bj].astype(float)
+
+    # background cluster handling
+    if not img.has_transparency:
+        lum = cluster_rgb.sum(axis=1)
+        bg = int(np.argmax(lum))     # lightest = paper
     else:
-        _keep.append(i)
-if len(_keep) < len(centroids):
-    _remap = np.full(len(centroids), -1, dtype=np.int32)
-    for _new, _old in enumerate(_keep):
-        _remap[_old] = _new
-    label_all = _remap[label_all]
-    centroids = centroids[_keep]
+        bg = None                    # transparent = background (no cluster)
 
-cluster_rgb = centroids
+    print(f"image {W}x{H} -> {scale.Wmm:.0f}x{scale.Hmm:.0f} mm "
+          f"({scale.px_per_mm:.1f} px/mm), palette k={len(centroids)}")
+    if bg is not None:
+        print(f"  background (skip) = {_rgb_str(cluster_rgb[bg])}")
 
-# snap the detected border colour to the nearest palette colour when they are
-# visually the same, so the border shares the fill's thread
-if border_color is not None:
-    _bd = np.linalg.norm(cluster_rgb.astype(float) - np.asarray(border_color, float), axis=1)
-    _bj = int(np.argmin(_bd))
-    if _bd[_bj] <= 40:
-        border_color = cluster_rgb[_bj].astype(float)
-
-# background cluster handling
-if not has_transparency:
-    lum = cluster_rgb.sum(axis=1)
-    bg = int(np.argmax(lum))     # lightest = paper
-else:
-    bg = None                    # transparent = background (no cluster)
-
-print(f"image {W}x{H} -> {Wmm:.0f}x{Hmm:.0f} mm ({px_per_mm:.1f} px/mm), palette k={len(centroids)}")
-if bg is not None:
-    print(f"  background (skip) = {_rgb_str(cluster_rgb[bg])}")
+    hex_to_idx = {hexkey(centroids[c]).lower(): c for c in range(len(centroids))}
+    return Palette(centroids=cluster_rgb, label_all=label_all, bg=bg, hex_to_idx=hex_to_idx)
 
 
-def hexkey(c):
-    return "#%02x%02x%02x" % tuple(int(v) for v in cluster_rgb[c])
+def order_colors(palette, settings):
+    """Return (fill_colors light->dark with explicit order applied, outline colour)."""
+    cluster_rgb = palette.centroids
+    bg = palette.bg
+
+    # default: all non-background colors sorted light->dark (bottom->top)
+    _default_colors = sorted(
+        [c for c in range(len(cluster_rgb)) if c != bg],
+        key=lambda c: luma(cluster_rgb[c]),
+        reverse=True,
+    )
+
+    # apply explicit order: listed colors first (in list order), then unlisted by luma
+    listed = [c for c in
+              (palette.hex_to_idx[h.lower()] for h in settings.order if h.lower() in palette.hex_to_idx)
+              if c != bg]
+    fill_colors = listed + [c for c in _default_colors if c not in listed]
+
+    # skip colors
+    fill_colors = [c for c in fill_colors if hexkey(cluster_rgb[c]).lower() not in settings.skip]
+
+    # outline colour = darkest remaining fill; its thin parts become satin
+    lw = min(fill_colors, key=lambda c: luma(cluster_rgb[c])) if fill_colors else None
+
+    print("order:", [hexkey(cluster_rgb[c]) for c in fill_colors])
+    return fill_colors, lw
 
 
-hex_to_idx = {hexkey(c).lower(): c for c in range(len(centroids))}
-
-# default: all non-background colors sorted light->dark (bottom->top)
-_default_colors = sorted(
-    [c for c in range(len(centroids)) if c != bg],
-    key=lambda c: luma(cluster_rgb[c]),
-    reverse=True,
-)
-
-# apply explicit order: listed colors first (in list order), then unlisted by luma
-listed = [c for c in
-          (hex_to_idx[h.lower()] for h in _ORDER if h.lower() in hex_to_idx)
-          if c != bg]
-fill_colors = listed + [c for c in _default_colors if c not in listed]
-
-# skip colors
-fill_colors = [c for c in fill_colors if hexkey(c).lower() not in _SKIP]
-
-# outline colour = darkest remaining fill; its thin parts become satin
-lw = min(fill_colors, key=lambda c: luma(cluster_rgb[c])) if fill_colors else None
-
-print("order:", [hexkey(c) for c in fill_colors])
-
-
-def mask_for(c, use_border_exclusion=False):
-    m = (label_all == c) & silhouette
-    if use_border_exclusion and border_ring is not None:
-        m = m & (~border_ring)
-    if OPEN_RADIUS:
-        m = ndimage.binary_opening(m, structure=morphology.disk(OPEN_RADIUS))
-    if CLOSE_RADIUS:
-        m = ndimage.binary_closing(m, structure=morphology.disk(CLOSE_RADIUS))
+def mask_for(c, palette, img, border, settings, use_border_exclusion=False):
+    m = (palette.label_all == c) & img.silhouette
+    if use_border_exclusion and border.ring is not None:
+        m = m & (~border.ring)
+    if settings.open_radius:
+        m = ndimage.binary_opening(m, structure=morphology.disk(settings.open_radius))
+    if settings.close_radius:
+        m = ndimage.binary_closing(m, structure=morphology.disk(settings.close_radius))
     return m
 
 
-def contour_paths(mask, min_area=MIN_COMP_PX, min_hole=MIN_HOLE_PX, tolerance=TOLERANCE):
+def build_masks(img, border, palette, fill_colors, lw, settings):
+    """Per-colour cleaned masks, with the border ring excluded before filling.
+
+    Later changes land here: palette pinning only changes ``palette`` upstream;
+    underlap (grow each fill under later-stitched layers) and raster pull
+    (stretch each mask along its row angle) both operate on this dict.
+    """
+    masks = {}
+    for c in fill_colors:
+        masks[c] = mask_for(c, palette, img, border, settings,
+                            use_border_exclusion=img.has_transparency)
+    if lw is not None and lw not in masks:
+        masks[lw] = mask_for(lw, palette, img, border, settings,
+                             use_border_exclusion=img.has_transparency)
+    return masks
+
+
+def contour_paths(mask, min_area, min_hole, tolerance):
     """Return (path_d_strings, centroids, outer_point_arrays, keep_lab, dropped, polys).
 
     Components are NOT ordered here; the global emit pass orders them with the
@@ -570,16 +700,21 @@ def contour_paths(mask, min_area=MIN_COMP_PX, min_hole=MIN_HOLE_PX, tolerance=TO
     return paths, cents, pts, keep_lab, dropped, polys_out
 
 
-# ---------------------------------------------------------------------------
-# outlines -> satin: skeletonize the darkest colour, classify each segment by its
-# own width, and carve the satin bands out of that colour's fill
-# ---------------------------------------------------------------------------
-outline_items = []
-lw_cover = None
-if lw is not None and not NO_SATIN:
-    lw_mask = mask_for(lw, use_border_exclusion=has_transparency)
-    segs = satin_segments(lw_mask, px_per_mm, SATIN_MIN_LEN_MM,
-                          SATIN_MIN_MM, SATIN_MAX_MM, TOLERANCE)
+def outline_satins(img, scale, masks, palette, lw, settings):
+    """Skeletonize the darkest colour's thin parts into satin segments.
+
+    Later changes land here: satin end extension at junctions (E3) modifies the
+    emitted segments before they are covered/carved.
+    """
+    W, H = img.W, img.H
+    outline_items = []
+    lw_cover = None
+    if lw is None or settings.no_satin:
+        return outline_items, lw_cover
+
+    lw_mask = masks[lw]
+    segs = satin_segments(lw_mask, scale.px_per_mm, settings.satin_min_len_mm,
+                          settings.satin_min_mm, settings.satin_max_mm, scale.tolerance)
     # A satin shorter than it is wide is not stitchable: its rails are shorter
     # than the zigzag travel, and Ink/Stitch then builds a section with no
     # points and dies with "tuple index out of range" in flattened_sections.
@@ -587,8 +722,8 @@ if lw is not None and not NO_SATIN:
     # gate, so re-test on the emitted polyline.
     _segs = []
     for d, poly, w in segs:
-        _len = float(np.hypot(*np.diff(poly, axis=0).T).sum()) / px_per_mm
-        if _len < max(2.5, 1.5 * w / px_per_mm):
+        _len = float(np.hypot(*np.diff(poly, axis=0).T).sum()) / scale.px_per_mm
+        if _len < max(2.5, 1.5 * w / scale.px_per_mm):
             continue
         _segs.append((d, poly, w))
     if len(_segs) != len(segs):
@@ -601,72 +736,77 @@ if lw is not None and not NO_SATIN:
         for d, poly, w in segs:
             outline_items.append(dict(cent=(float(poly[:, 0].mean()), float(poly[:, 1].mean())),
                                       pts=poly, d=d, satin=True, lab_id=None,
-                                      rgb=cluster_rgb[lw], spacing=None, width_px=w))
+                                      rgb=palette.centroids[lw], spacing=None, width_px=w))
             cover_draw.line([(float(x), float(y)) for y, x in poly], fill=255,
                             width=max(1, int(round(w))), joint="curve")
         # dilate the band a couple of px before carving the fill: otherwise the
         # band-edge mismatch with the simplified skeleton leaves sub-mm slivers
         lw_cover = ndimage.binary_dilation((np.array(cover_img) > 0) & lw_mask,
                                            structure=morphology.disk(2))
-        print(f"satin outlines: {len(outline_items)} segments from {_rgb_str(cluster_rgb[lw])}")
+        print(f"satin outlines: {len(outline_items)} segments from {_rgb_str(palette.centroids[lw])}")
+    return outline_items, lw_cover
 
-# ---------------------------------------------------------------------------
-# collect every stitched object, then order it globally (needle-aware)
-# ---------------------------------------------------------------------------
-print("fills:")
-color_items = {}
-color_keep_lab = {}
-satinized_satins = []      # (cluster, d, pts, width_px)
-satinized_polys = []       # px-space shapely geoms removed from their fill
-for c in fill_colors:
-    mask = mask_for(c, use_border_exclusion=has_transparency)
-    if c == lw and lw_cover is not None:
-        mask = mask & ~lw_cover
-    paths, cents, pts, keep_lab, dropped, geoms = contour_paths(mask)
-    hx = hexkey(c).lower()
-    angle = FILL_ANGLE if FILL_ANGLE is not None else _ANGLE.get(hx)
-    items = []
-    n_sat = 0
-    for i in range(len(paths)):
-        geom = geoms[i] if hx in SATINIZE_COLORS else None
-        if geom is not None and not geom.is_empty:
-            # satinize works in mm (its own pixel grid is 0.1 mm), so hand it
-            # fitted mm geometry and scale the resulting centrelines back to px
-            from shapely import affinity
-            # origin=(0, 0) is essential: affinity.scale defaults to
-            # origin='center', which would scale about each component's own
-            # centroid and leave it sitting near its original pixel position
-            res = satinize.component_to_satins(
-                affinity.scale(geom, scale, scale, origin=(0, 0)),
-                max_row_mm=SAT_MAX_ROW_MM, max_rows=SAT_MAX_ROWS,
-                min_coverage=SAT_MIN_COVERAGE, max_overhang=SAT_MAX_OVERHANG)
-            if res and all(satinize.centreline_ok(r["centreline"], r["width_mm"])
-                           for r in res):
-                n_sat += 1
-                satinized_polys.append(geom)
-                for r in res:
-                    line = np.asarray(r["centreline"], float) / scale
-                    satinized_satins.append(dict(
-                        cluster=c, rgb=cluster_rgb[c], lab_id=None, satin=True,
-                        cent=(float(line[:, 1].mean()), float(line[:, 0].mean())),
-                        pts=np.vstack([line[:, ::-1], line[-1::-1, ::-1]]),
-                        d="M " + " L ".join(f"{x:.1f},{y:.1f}" for x, y in line),
-                        width_px=r["width_mm"] / scale))
-                continue        # the satin replaces this fill component
-        items.append(dict(cent=cents[i], pts=pts[i], d=paths[i], satin=False,
-                          lab_id=i + 1, rgb=cluster_rgb[c],
-                          spacing=_DENSITY.get(hx), width_px=None, angle=angle))
-    color_items[c] = items
-    color_keep_lab[c] = keep_lab
-    _sat_note = f", {n_sat} -> satin" if n_sat else ""
-    print(f"  {_rgb_str(cluster_rgb[c])}: {len(items)} comps (dropped {dropped}){_sat_note}")
 
-if satinized_satins:
-    # each fill component is its own object, so dropping the item removes the
-    # fill entirely -- the satin replaces it, with no fill sliver left behind
-    _w_min = min(s["width_px"] / px_per_mm for s in satinized_satins)
-    print(f"satinize: {len(satinized_satins)} satin column(s) from "
-          f"{len(satinized_polys)} component(s), narrowest {_w_min:.2f} mm")
+def fill_components(img, scale, border, palette, masks, fill_colors, lw, lw_cover, settings):
+    """Contour every fill colour; satinize the components listed in satinize.colors."""
+    from shapely import affinity
+
+    color_items = {}
+    color_keep_lab = {}
+    satinized_satins = []      # (cluster, d, pts, width_px)
+    satinized_polys = []       # px-space shapely geoms removed from their fill
+    print("fills:")
+    for c in fill_colors:
+        mask = masks[c]
+        if c == lw and lw_cover is not None:
+            mask = mask & ~lw_cover
+        paths, cents, pts, keep_lab, dropped, geoms = contour_paths(
+            mask, scale.min_comp_px, scale.min_hole_px, scale.tolerance)
+        hx = hexkey(palette.centroids[c]).lower()
+        angle = settings.fill_angle if settings.fill_angle is not None else settings.angle_map.get(hx)
+        items = []
+        n_sat = 0
+        for i in range(len(paths)):
+            geom = geoms[i] if hx in settings.satinize_colors else None
+            if geom is not None and not geom.is_empty:
+                # satinize works in mm (its own pixel grid is 0.1 mm), so hand it
+                # fitted mm geometry and scale the resulting centrelines back to px
+                # origin=(0, 0) is essential: affinity.scale defaults to
+                # origin='center', which would scale about each component's own
+                # centroid and leave it sitting near its original pixel position
+                res = satinize.component_to_satins(
+                    affinity.scale(geom, scale.scale, scale.scale, origin=(0, 0)),
+                    max_row_mm=settings.sat_max_row_mm, max_rows=settings.sat_max_rows,
+                    min_coverage=settings.sat_min_coverage, max_overhang=settings.sat_max_overhang)
+                if res and all(satinize.centreline_ok(r["centreline"], r["width_mm"])
+                               for r in res):
+                    n_sat += 1
+                    satinized_polys.append(geom)
+                    for r in res:
+                        line = np.asarray(r["centreline"], float) / scale.scale
+                        satinized_satins.append(dict(
+                            cluster=c, rgb=palette.centroids[c], lab_id=None, satin=True,
+                            cent=(float(line[:, 1].mean()), float(line[:, 0].mean())),
+                            pts=np.vstack([line[:, ::-1], line[-1::-1, ::-1]]),
+                            d="M " + " L ".join(f"{x:.1f},{y:.1f}" for x, y in line),
+                            width_px=r["width_mm"] / scale.scale))
+                    continue        # the satin replaces this fill component
+            items.append(dict(cent=cents[i], pts=pts[i], d=paths[i], satin=False,
+                              lab_id=i + 1, rgb=palette.centroids[c],
+                              spacing=settings.density_map.get(hx), width_px=None, angle=angle))
+        color_items[c] = items
+        color_keep_lab[c] = keep_lab
+        _sat_note = f", {n_sat} -> satin" if n_sat else ""
+        print(f"  {_rgb_str(palette.centroids[c])}: {len(items)} comps (dropped {dropped}){_sat_note}")
+
+    if satinized_satins:
+        # each fill component is its own object, so dropping the item removes the
+        # fill entirely -- the satin replaces it, with no fill sliver left behind
+        _w_min = min(s["width_px"] / scale.px_per_mm for s in satinized_satins)
+        print(f"satinize: {len(satinized_satins)} satin column(s) from "
+              f"{len(satinized_polys)} component(s), narrowest {_w_min:.2f} mm")
+
+    return color_items, color_keep_lab, satinized_satins, satinized_polys
 
 
 def nn_sort(items, needle):
@@ -684,81 +824,81 @@ def nn_sort(items, needle):
     return out
 
 
-objs = []
-needle = [0.0, 0.0]
-layer_no = 0
+def order_objects(img, scale, palette, fill_colors, color_items, color_keep_lab,
+                  satinized_satins, outline_items, border, settings):
+    """Global needle-aware ordering; builds stitch_index for the trim test."""
+    W, H = img.W, img.H
+    objs = []
+    needle = [0.0, 0.0]
+    layer_no = 0
 
-# stitch_index[y, x] = emit index of the last object covering that pixel (-1 =
-# nothing).  A jump after object i is hidden iff every sampled pixel has
-# stitch_index > i: something stitched later lies over the thread.
-stitch_index = np.full((H, W), -1, dtype=np.int32)
+    # stitch_index[y, x] = emit index of the last object covering that pixel (-1 =
+    # nothing).  A jump after object i is hidden iff every sampled pixel has
+    # stitch_index > i: something stitched later lies over the thread.
+    stitch_index = np.full((H, W), -1, dtype=np.int32)
 
-color_satins = {}
-for s in satinized_satins:
-    color_satins.setdefault(s["cluster"], []).append(s)
+    color_satins = {}
+    for s in satinized_satins:
+        color_satins.setdefault(s["cluster"], []).append(s)
 
-for c in fill_colors:
-    for o in nn_sort(color_items[c], needle):
-        o["group_id"] = "color%d" % layer_no
-        o["group_label"] = hexkey(c)
+    for c in fill_colors:
+        for o in nn_sort(color_items[c], needle):
+            o["group_id"] = "color%d" % layer_no
+            o["group_label"] = hexkey(palette.centroids[c])
+            o["index"] = len(objs)
+            stitch_index[color_keep_lab[c] == o["lab_id"]] = o["index"]
+            objs.append(o)
+            needle = o["cent"]
+        # this colour's satinized columns go last inside the same layer, so the
+        # satin is stitched on top of the fills around it
+        for o in nn_sort(color_satins.get(c, []), needle):
+            o["group_id"] = "color%d" % layer_no
+            o["group_label"] = hexkey(palette.centroids[c])
+            o["satin"] = True
+            o["index"] = len(objs)
+            _si = Image.new("I", (W, H), -1)
+            ImageDraw.Draw(_si).line([(float(x), float(y)) for y, x in o["pts"]],
+                                     fill=o["index"],
+                                     width=max(1, int(round(o["width_px"]))), joint="curve")
+            stitch_index = np.maximum(stitch_index, np.array(_si, dtype=np.int32))
+            objs.append(o)
+            needle = o["cent"]
+        layer_no += 1
+    color_keep_lab.clear()
+
+    if outline_items:
+        satin_img = Image.new("I", (W, H), -1)
+        satin_draw = ImageDraw.Draw(satin_img)
+        for o in nn_sort(outline_items, needle):
+            o["group_id"] = "outlines"
+            o["group_label"] = "Outline"
+            o["index"] = len(objs)
+            satin_draw.line([(float(x), float(y)) for y, x in o["pts"]], fill=o["index"],
+                            width=max(1, int(round(o["width_px"]))), joint="curve")
+            objs.append(o)
+            needle = o["cent"]
+        stitch_index = np.maximum(stitch_index, np.array(satin_img, dtype=np.int32))
+        layer_no += 1
+
+    for d_path, poly in zip(border.paths, border.pts_list):
+        o = dict(group_id="border", group_label="Border",
+                 cent=(float(poly[:, 0].mean()), float(poly[:, 1].mean())),
+                 pts=poly, d=d_path, satin=True, rgb=border.color,
+                 spacing=None, width_px=scale.border_px)
         o["index"] = len(objs)
-        stitch_index[color_keep_lab[c] == o["lab_id"]] = o["index"]
+        # model the border as its actual stroke (BORDER_PX wide, centred on the
+        # ring midline contour, so it covers the carved ring)
+        bim = Image.new("I", (W, H), -1)
+        ring_pts = [(float(x), float(y)) for y, x in poly]
+        ImageDraw.Draw(bim).line(ring_pts + ring_pts[:1], fill=o["index"],
+                                 width=max(1, int(round(scale.border_px))), joint="curve")
+        stitch_index = np.maximum(stitch_index, np.array(bim, dtype=np.int32))
         objs.append(o)
-        needle = o["cent"]
-    # this colour's satinized columns go last inside the same layer, so the
-    # satin is stitched on top of the fills around it
-    for o in nn_sort(color_satins.get(c, []), needle):
-        o["group_id"] = "color%d" % layer_no
-        o["group_label"] = hexkey(c)
-        o["satin"] = True
-        o["index"] = len(objs)
-        _si = Image.new("I", (W, H), -1)
-        ImageDraw.Draw(_si).line([(float(x), float(y)) for y, x in o["pts"]],
-                                 fill=o["index"],
-                                 width=max(1, int(round(o["width_px"]))), joint="curve")
-        stitch_index = np.maximum(stitch_index, np.array(_si, dtype=np.int32))
-        objs.append(o)
-        needle = o["cent"]
-    layer_no += 1
-color_keep_lab.clear()
 
-if outline_items:
-    satin_img = Image.new("I", (W, H), -1)
-    satin_draw = ImageDraw.Draw(satin_img)
-    for o in nn_sort(outline_items, needle):
-        o["group_id"] = "outlines"
-        o["group_label"] = "Outline"
-        o["index"] = len(objs)
-        satin_draw.line([(float(x), float(y)) for y, x in o["pts"]], fill=o["index"],
-                        width=max(1, int(round(o["width_px"]))), joint="curve")
-        objs.append(o)
-        needle = o["cent"]
-    stitch_index = np.maximum(stitch_index, np.array(satin_img, dtype=np.int32))
-    layer_no += 1
-
-for d_path, poly in zip(border_paths, border_pts_list):
-    o = dict(group_id="border", group_label="Border",
-             cent=(float(poly[:, 0].mean()), float(poly[:, 1].mean())),
-             pts=poly, d=d_path, satin=True, rgb=border_color,
-             spacing=None, width_px=BORDER_PX)
-    o["index"] = len(objs)
-    # model the border as its actual stroke (BORDER_PX wide, centred on the
-    # ring midline contour, so it covers the carved ring)
-    bim = Image.new("I", (W, H), -1)
-    ring_pts = [(float(x), float(y)) for y, x in poly]
-    ImageDraw.Draw(bim).line(ring_pts + ring_pts[:1], fill=o["index"],
-                             width=max(1, int(round(BORDER_PX))), joint="curve")
-    stitch_index = np.maximum(stitch_index, np.array(bim, dtype=np.int32))
-    objs.append(o)
-
-if not objs:
-    sys.exit("error: no stitchable objects produced (single-colour image, or every colour skipped via skip_colors?)")
+    return objs, stitch_index
 
 
-# ---------------------------------------------------------------------------
-# trim: cut a jump that is long OR exposed (not hidden by a later stitch)
-# ---------------------------------------------------------------------------
-def gap_and_segment(a, b):
+def gap_and_segment(a, b, px_per_mm):
     """Travel bounds (mm) between two objects, plus the nearest-boundary segment.
 
     Returns ``(d_min, d_max, p0, p1)``.
@@ -783,7 +923,7 @@ def gap_and_segment(a, b):
     return d_min, d_max, pa[idx[j]], pb[j]
 
 
-def is_hidden(p0, p1, idx):
+def is_hidden(p0, p1, idx, stitch_index, H, W, px_per_mm):
     """True if the straight jump after object ``idx`` is covered by a later stitch."""
     n = max(8, int(np.hypot(*(p1 - p0)) / px_per_mm * 2))
     for t in np.linspace(0.0, 1.0, n + 2)[1:-1]:
@@ -794,22 +934,27 @@ def is_hidden(p0, p1, idx):
     return True
 
 
-trim_after = [False] * len(objs)
-n_trims = 0
-if TRIM:
-    for i in range(len(objs) - 1):
-        d_min, d_max, p0, p1 = gap_and_segment(objs[i], objs[i + 1])
-        if d_min <= TRIM_MIN_MM:
-            continue
-        if TRIM_THRESHOLD_MM == 0 or d_max > TRIM_THRESHOLD_MM or not is_hidden(p0, p1, i):
-            trim_after[i] = True
-    n_trims = sum(trim_after)
-    print(f"trim: {n_trims} cuts / {len(objs)} objects (threshold {TRIM_THRESHOLD_MM} mm)")
+def plan_trims(img, scale, objs, stitch_index, settings):
+    """Trim: cut a jump that is long OR exposed (not hidden by a later stitch)."""
+    H, W = img.H, img.W
+    trim_after = [False] * len(objs)
+    n_trims = 0
+    if settings.trim:
+        for i in range(len(objs) - 1):
+            d_min, d_max, p0, p1 = gap_and_segment(objs[i], objs[i + 1], scale.px_per_mm)
+            if d_min <= settings.trim_min_mm:
+                continue
+            if (settings.trim_threshold_mm == 0 or d_max > settings.trim_threshold_mm
+                    or not is_hidden(p0, p1, i, stitch_index, H, W, scale.px_per_mm)):
+                trim_after[i] = True
+        n_trims = sum(trim_after)
+        print(f"trim: {n_trims} cuts / {len(objs)} objects (threshold {settings.trim_threshold_mm} mm)")
+    return trim_after, n_trims
 
 
-def el(id_, fill_rgb, d, spacing=None, trim_after=False, angle=None):
+def el(id_, fill_rgb, d, settings, spacing=None, trim_after=False, angle=None):
     hx = "#%02x%02x%02x" % tuple(int(v) for v in fill_rgb)
-    rs = spacing if spacing is not None else ROW_SPACING_MM
+    rs = spacing if spacing is not None else settings.row_spacing_mm
     trim = 'inkstitch:trim_after="true" ' if trim_after else ""
     ang = f'inkstitch:angle="{angle:g}" ' if angle is not None else ""
     return (f'<path id="{id_}" style="fill:{hx};stroke:none" fill-rule="evenodd" '
@@ -817,65 +962,110 @@ def el(id_, fill_rgb, d, spacing=None, trim_after=False, angle=None):
             f'inkstitch:fill_underlay_skip_last="true" {trim}d="{d}"/>')
 
 
-def satin_el(id_, stroke_rgb, d, width_px, trim_after=False):
-    w_mm = width_px / px_per_mm
-    if w_mm <= SATIN_GATE_MM:      # Ink/Stitch's test is strictly `>`
+def satin_el(id_, stroke_rgb, d, width_px, scale, settings, trim_after=False):
+    w_mm = width_px / scale.px_per_mm
+    if w_mm <= settings.satin_gate_mm:      # Ink/Stitch's test is strictly `>`
         # would be emitted as satin_column and then silently stitched as running
         print(f"warning: satin {id_} is {w_mm:.2f} mm wide, below Ink/Stitch's "
-              f"{SATIN_GATE_MM:.1f} mm gate -- it will stitch as running stitch")
+              f"{settings.satin_gate_mm:.1f} mm gate -- it will stitch as running stitch")
     hx = "#%02x%02x%02x" % tuple(int(v) for v in stroke_rgb)
     trim = 'inkstitch:trim_after="true" ' if trim_after else ""
-    pull = f'inkstitch:pull_compensation_mm="{SATIN_PULL_MM} {SATIN_PULL_MM}" ' if SATIN_PULL_MM else ""
+    pull = (f'inkstitch:pull_compensation_mm="{settings.satin_pull_mm} {settings.satin_pull_mm}" '
+            if settings.satin_pull_mm else "")
     return (f'<path id="{id_}" style="fill:none;stroke:{hx};stroke-width:{width_px:.2f}" '
             f'inkstitch:satin_column="true" {pull}{trim}d="{d}"/>')
 
 
-p = []
-p.append(
-    '<?xml version="1.0" encoding="UTF-8"?>\n'
-    '<svg xmlns="http://www.w3.org/2000/svg" '
-    'xmlns:inkstitch="http://inkstitch.org/namespace" '
-    'xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" '
-    'xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.0.dtd" '
-    f'width="{Wmm:.2f}mm" height="{Hmm:.2f}mm" viewBox="0 0 {W} {H}" '
-    'inkscape:document-units="mm" sodipodi:docname="design.svg">\n'
-)
-p.append(
-    f'  <sodipodi:namedview id="namedview1" pagecolor="#ffffff" units="mm" '
-    f'inkscape:document-units="mm" pagewidth="{Wmm:.2f}" pageheight="{Hmm:.2f}" '
-    'inkscape:pageopacity="0.0" inkscape:pagecheckerboard="0" showgrid="false"/>\n'
-)
-idx = 0
-current_group = None
-for o, tm in zip(objs, trim_after):
-    if o["group_id"] != current_group:
-        if current_group is not None:
-            p.append('  </g>\n')
-        p.append(f'  <g inkscape:label="{o["group_label"]}" inkscape:groupmode="layer" '
-                 f'id="{o["group_id"]}">\n')
-        current_group = o["group_id"]
-    if o["satin"]:
-        p.append("    " + satin_el(f"s{idx}", o["rgb"], o["d"], o["width_px"], trim_after=tm) + "\n")
+def emit_svg(out, objs, trim_after, img, scale, settings):
+    """Write the Ink/Stitch SVG.
+
+    Later changes land here: ``inkstitch_svg_version`` metadata and explicit
+    stitch params are added to the header/fill elements.
+    """
+    W, H = img.W, img.H
+    p = []
+    p.append(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<svg xmlns="http://www.w3.org/2000/svg" '
+        'xmlns:inkstitch="http://inkstitch.org/namespace" '
+        'xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" '
+        'xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.0.dtd" '
+        f'width="{scale.Wmm:.2f}mm" height="{scale.Hmm:.2f}mm" viewBox="0 0 {W} {H}" '
+        'inkscape:document-units="mm" sodipodi:docname="design.svg">\n'
+    )
+    p.append(
+        f'  <sodipodi:namedview id="namedview1" pagecolor="#ffffff" units="mm" '
+        f'inkscape:document-units="mm" pagewidth="{scale.Wmm:.2f}" pageheight="{scale.Hmm:.2f}" '
+        'inkscape:pageopacity="0.0" inkscape:pagecheckerboard="0" showgrid="false"/>\n'
+    )
+    idx = 0
+    current_group = None
+    for o, tm in zip(objs, trim_after):
+        if o["group_id"] != current_group:
+            if current_group is not None:
+                p.append('  </g>\n')
+            p.append(f'  <g inkscape:label="{o["group_label"]}" inkscape:groupmode="layer" '
+                     f'id="{o["group_id"]}">\n')
+            current_group = o["group_id"]
+        if o["satin"]:
+            p.append("    " + satin_el(f"s{idx}", o["rgb"], o["d"], o["width_px"],
+                                       scale, settings, trim_after=tm) + "\n")
+        else:
+            p.append("    " + el(f"f{idx}", o["rgb"], o["d"], settings, spacing=o["spacing"],
+                                  trim_after=tm, angle=o.get("angle")) + "\n")
+        idx += 1
+    if current_group is not None:
+        p.append('  </g>\n')
+    p.append('</svg>\n')
+
+    with open(out, "w", encoding="utf-8") as f:
+        f.write("".join(p))
+
+
+def write_preview(out, img, palette):
+    """Posterized preview PNG next to the SVG (for review)."""
+    preview = np.full((img.H, img.W, 3), 255, dtype=np.uint8)
+    view = palette.label_all[img.silhouette]
+    preview[img.silhouette] = palette.centroids[view]
+    if img.has_transparency:
+        alpha8 = np.where(img.silhouette, 255, 0).astype(np.uint8)
+        prev = np.dstack([preview, alpha8])
     else:
-        p.append("    " + el(f"f{idx}", o["rgb"], o["d"], spacing=o["spacing"],
-                              trim_after=tm, angle=o.get("angle")) + "\n")
-    idx += 1
-if current_group is not None:
-    p.append('  </g>\n')
-p.append('</svg>\n')
+        prev = preview
+    Image.fromarray(prev).save(out.rsplit(".", 1)[0] + "_posterized.png")
 
-with open(OUT, "w", encoding="utf-8") as f:
-    f.write("".join(p))
 
-# posterized preview (for review)
-preview = np.full((H, W, 3), 255, dtype=np.uint8)
-view = label_all[silhouette]
-preview[silhouette] = cluster_rgb[view]
-if has_transparency:
-    alpha8 = np.where(silhouette, 255, 0).astype(np.uint8)
-    prev = np.dstack([preview, alpha8])
-else:
-    prev = preview
-Image.fromarray(prev).save(OUT.rsplit(".", 1)[0] + "_posterized.png")
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    flags, args = parse_args(argv)
+    cfg = load_config(flags.get("config"))
+    settings = build_settings(flags, cfg)
 
-print(f"\nwrote {OUT}")
+    out = args[1] if len(args) > 1 else "work/design.svg"
+    img_path = args[0] if len(args) > 0 else "Scavenger's_Daughter_by_the_dusty_druid.webp"
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+
+    img = load_image(img_path)
+    scale = design_scale(img, settings)
+    border = detect_border(img, scale, settings)
+    palette = build_palette(img, scale, border, settings)
+    fill_colors, lw = order_colors(palette, settings)
+    masks = build_masks(img, border, palette, fill_colors, lw, settings)
+    outline_items, lw_cover = outline_satins(img, scale, masks, palette, lw, settings)
+    color_items, color_keep_lab, satinized_satins, satinized_polys = fill_components(
+        img, scale, border, palette, masks, fill_colors, lw, lw_cover, settings)
+    objs, stitch_index = order_objects(
+        img, scale, palette, fill_colors, color_items, color_keep_lab,
+        satinized_satins, outline_items, border, settings)
+
+    if not objs:
+        sys.exit("error: no stitchable objects produced (single-colour image, or every colour skipped via skip_colors?)")
+
+    trim_after, n_trims = plan_trims(img, scale, objs, stitch_index, settings)
+    emit_svg(out, objs, trim_after, img, scale, settings)
+    write_preview(out, img, palette)
+    print(f"\nwrote {out}")
+
+
+if __name__ == "__main__":
+    main()
