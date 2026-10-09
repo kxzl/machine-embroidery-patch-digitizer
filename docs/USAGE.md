@@ -68,7 +68,9 @@ put on `PYTHONPATH` automatically by `run.sh` for the Ink/Stitch export step.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--colors N` | `5` | Number of posterized thread colors (k-means). Raise for more shading detail, lower for cleaner/bolder patches. |
+| `--colors N` | `5` | Upper bound on the number of thread colors for the automatic palette. Raise for more shading detail, lower for cleaner/bolder patches. Ignored (with a note) when a palette is pinned. |
+| `--palette HEX[,HEX...]` | — | Pin the thread colours, e.g. `--palette "#1A1A1A,#B5651D"`. Every pixel is assigned to the nearest pinned hex in CIELAB and the pinned hexes are emitted verbatim; no clustering or centroid merge runs. Pinned colours with zero pixels are dropped (with a note). CLI wins over YAML `palette:`. |
+| `--palette-mode auto\|kmeans` | `auto` | Palette used when nothing is pinned: `auto` is the S3 Lab palette (over-cluster, protected merge, anti-alias blend absorption); `kmeans` restores the legacy RGB k-means exactly. |
 | `--border-mm W` | `2.5` | Satin border width (mm). Only applies to transparent-background images. |
 | `--no-border` | off | Don't add the satin border. |
 | `--density MM` | `0.4` raster / `0.3` SVG | Default fill row spacing (mm). Keep in `0.3–0.6`; below breaks needles, above leaves gaps. The SVG path defaults to `0.3` because `0.4` left the base fabric visible on the Scavenger's Daughter test. **An explicit density (CLI or YAML) overrides the `row_spacing_mm` authored on the artwork** — the Scavenger's paths ship `0.4`, which otherwise silently wins and reopens the gaps. |
@@ -84,7 +86,7 @@ put on `PYTHONPATH` automatically by `run.sh` for the Ink/Stitch export step.
 | `--no-trim` | off | Trimming is **on by default**; this disables it. |
 | `--trim` | on | Explicitly enable trimming (already the default; also overrides `trim.enabled: false` in a YAML config). |
 | `--trim-mm N` | `4.0` | Cut a jump longer than this (mm); `0` = cut every long/exposed jump. Jumps under 2 mm are always skipped. |
-| `--config F` | — | Per-image YAML config (`order`, `skip_colors`, `density`, `border`, `trim`). CLI flags win over its values. Generate a starter with `tools/digitize/make_config.py <image>`. |
+| `--config F` | — | Per-image YAML config (`order`, `skip_colors`, `density`, `border`, `trim`, `palette`, `palette_mode`). CLI flags win over its values. Generate a starter with `tools/digitize/make_config.py <image>`, which also parses the `**Palette:**` line from `patch_descriptions/prompts/<name>.md` into `palette:` when one exists. |
 | `--no-export` | off | `run.sh` only: stop after writing the SVG, skip the Ink/Stitch VP3 export. Not forwarded to `vectorize.py`. |
 | (positional) input | — | Path to the source image (`.webp`/`.png`/`.jpg`). |
 | (positional) output | `work/design.svg` | Output SVG path. |
@@ -230,7 +232,10 @@ These live at the top of `tools/digitize/vectorize.py` and are not CLI flags
      detects the dark outer ring as the **satin border**, and fills the interior.
    - *Opaque* → flat art: drops the lightest cluster (paper) and treats the
      darkest cluster as **outlines** on its own top layer.
-2. **Denoise + posterize**: median filter, then k-means to `--colors` flat colors.
+2. **Denoise + palette**: median filter, then either assign every pixel to
+   the pinned `palette:` hexes in CIELAB, or derive an automatic palette
+   (S3 Lab over-cluster + protected merge by default; `--palette-mode kmeans`
+   for the legacy RGB k-means). `--colors` bounds the automatic palette.
 3. **Vectorize**: each color becomes closed `fill` regions with holes preserved
    (`fill-rule="evenodd"`); sub-mm components/holes are dropped.
 4. **Outlines → satin**: the darkest colour's *thin* regions (thinner than
@@ -243,7 +248,11 @@ These live at the top of `tools/digitize/vectorize.py` and are not CLI flags
 6. **Trim**: a jump is cut when it is longer than `--trim-mm` **or** when it is
    not hidden under a later-stitched layer (an exposed jump thread).
 7. **Emit Ink/Stitch SVG** with per-object params: `row_spacing_mm` (density),
-   `trim_after`, and `satin_column` for outlines and border.
+   `trim_after`, and `satin_column` for outlines and border. The file carries
+   `inkstitch_svg_version` 4 metadata and pins `max_stitch_length_mm="3"` /
+   `running_stitch_length_mm="1.5"` on fills, so Ink/Stitch treats it as current
+   (no "Unversioned Ink/Stitch SVG file detected" dialog) and stitches the same
+   rows the legacy update used to inject.
 8. **Export** via Ink/Stitch headless CLI to `.vp3`.
 
 Stitch order: fills (bottom, light→dark) → satin outlines → satin border (top).

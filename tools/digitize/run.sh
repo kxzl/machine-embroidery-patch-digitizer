@@ -31,7 +31,7 @@ while [[ $# -gt 0 ]]; do
     --*=*) FLAGS+=("$a") ;;
     --colors|--border-mm|--trim-mm|--density|--satin-max-mm|--size-mm|\
     --overlap-mm|--seam-pull-mm|--width-mm|--height-mm|--border-color|--skip-colors|\
-    --fill-angle|--satinize-colors)
+    --fill-angle|--satinize-colors|--palette|--palette-mode)
       FLAGS+=("$a" "$1"); shift ;;
     --key-background) KEY_BG=1 ;;
     --no-export) NO_EXPORT=1 ;;
@@ -69,6 +69,19 @@ EXT="${IMG##*.}"
 EXT_LC="$(printf '%s' "$EXT" | tr '[:upper:]' '[:lower:]')"
 if [[ "$EXT_LC" == "svg" ]]; then
   SCRIPT=tools/digitize/svg_digitize.py
+  # raster-only flags (palette pinning) would be mis-parsed by svg_digitize.py
+  FWD=()
+  i=0
+  while [[ $i -lt ${#FLAGS[@]} ]]; do
+    a="${FLAGS[$i]}"
+    case "$a" in
+      --palette|--palette-mode) i=$((i + 1)) ;;
+      --palette=*|--palette-mode=*) ;;
+      *) FWD+=("$a") ;;
+    esac
+    i=$((i + 1))
+  done
+  FLAGS=("${FWD[@]}")
 else
   SCRIPT=tools/digitize/vectorize.py
   # svg-only flags would be mis-parsed by vectorize.py; drop them (and values)

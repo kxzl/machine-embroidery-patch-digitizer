@@ -25,10 +25,12 @@ Usage:
                                      [--density MM] [--no-satin-outlines]
                                      [--satin-max-mm W] [--fill-angle DEG]
                                      [--satinize-colors HEX[,HEX]]
+                                     [--palette HEX[,HEX]] [--palette-mode auto|kmeans]
                                      [--trim] [--no-trim] [--trim-mm N] [--config F]
                                      [input.webp] [output.svg]
 """
 import os
+import re
 import sys
 import warnings
 from dataclasses import dataclass, field
@@ -40,13 +42,14 @@ from scipy import ndimage
 from scipy.cluster.vq import kmeans2
 from scipy.spatial import cKDTree
 from shapely.geometry import Polygon
-from skimage import measure, morphology
+from skimage import color, measure, morphology
 
 import satinize
 from skeleton import satin_segments
 
 _VALUE_FLAGS = {"--colors", "--border-mm", "--trim-mm", "--config", "--density",
-                "--satin-max-mm", "--size-mm", "--fill-angle", "--satinize-colors"}
+                "--satin-max-mm", "--size-mm", "--fill-angle", "--satinize-colors",
+                "--palette", "--palette-mode"}
 
 # module-level defaults (docs reference these names); build_settings resolves the
 # per-run values into a Settings instance.
@@ -73,6 +76,7 @@ TRIM_MIN_MM = 2.0          # never cut jumps shorter than this (Ink/Stitch adds 
 class Settings:
     """Every constant and YAML/CLI-resolved value for one run."""
     n_colors: int = 5
+    colors_given: bool = False
     size_mm: float = 100.0     # longer side of finished design (mm)
     no_border: bool = False
     border_mm: float = 2.5
@@ -91,6 +95,8 @@ class Settings:
     sat_max_overhang: float = 0.45
     order: list = field(default_factory=list)
     skip: set = field(default_factory=set)
+    palette: list = field(default_factory=list)   # pinned thread hexes, [] = auto
+    palette_mode: str = "auto"    # "auto" = S3 Lab palette, "kmeans" = legacy RGB
     # algorithm constants (module-level defaults, overridable per class later)
     satin_min_mm: float = SATIN_MIN_MM
     satin_gate_mm: float = SATIN_GATE_MM
@@ -179,12 +185,39 @@ def load_config(path):
         return yaml.safe_load(f) or {}
 
 
+def _parse_palette(value):
+    """Normalise a palette given as a comma/semicolon string or a YAML list of hexes.
+
+    Returns lowercase ``#rrggbb`` strings.  Invalid entries are reported and
+    skipped; an empty result keeps the automatic palette.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items = value.replace(";", ",").split(",")
+    else:
+        items = value
+    out = []
+    for it in items:
+        s = str(it).strip().strip("'\"")
+        if not s:
+            continue
+        if not s.startswith("#"):
+            s = "#" + s
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", s):
+            print(f"warning: ignoring invalid palette entry {it!r} (need #rrggbb)")
+            continue
+        out.append(s.lower())
+    return out
+
+
 def build_settings(flags, cfg):
     """Resolve CLI flags and YAML config into a Settings instance (CLI wins)."""
     def flag(name, default):
         return flags.get(name, default)
 
     n_colors = int(flag("colors", "5"))
+    colors_given = flag("colors", None) is not None
     no_border = flag("no-border", False) is True
     border_mm = float(flag("border-mm", "2.5"))
     no_trim = flag("no-trim", False) is True
@@ -217,6 +250,14 @@ def build_settings(flags, cfg):
         trim_threshold_mm = 0.0
     order = cfg.get("order") or []
     skip = {str(s).lower() for s in (cfg.get("skip_colors") or [])}
+    # pinned palette: CLI --palette wins over YAML palette:, which wins over auto.
+    _pal_arg = flag("palette", None)
+    palette = _parse_palette(_pal_arg if _pal_arg is not None else cfg.get("palette"))
+    _mode_arg = flag("palette-mode", None)
+    palette_mode = str(_mode_arg if _mode_arg is not None else cfg.get("palette_mode", "auto")).lower()
+    if palette_mode not in ("auto", "kmeans"):
+        print(f"warning: unknown palette_mode {palette_mode!r}; using 'auto'")
+        palette_mode = "auto"
     _dens = cfg.get("density") or {}
     if isinstance(_dens, (int, float)):
         row_spacing_mm = float(_dens)
@@ -274,13 +315,14 @@ def build_settings(flags, cfg):
                   f"(too dense breaks needles, too open leaves gaps)")
 
     return Settings(
-        n_colors=n_colors, size_mm=size_mm, no_border=no_border, border_mm=border_mm,
+        n_colors=n_colors, colors_given=colors_given, size_mm=size_mm, no_border=no_border, border_mm=border_mm,
         border_mode=_border_mode, trim=trim, trim_threshold_mm=trim_threshold_mm,
         row_spacing_mm=row_spacing_mm, no_satin=no_satin, fill_angle=fill_angle,
         angle_map=_angle, density_map=_density, satinize_colors=satinize_colors,
         sat_max_row_mm=sat_max_row_mm, sat_max_rows=sat_max_rows,
         sat_min_coverage=sat_min_coverage, sat_max_overhang=sat_max_overhang,
         order=order, skip=skip, satin_max_mm=satin_max_mm,
+        palette=palette, palette_mode=palette_mode,
     )
 
 
@@ -379,6 +421,110 @@ def kmeans_palette(pixels, k):
         warnings.simplefilter("ignore")  # empty clusters / 0-division are expected on few-colour images
         cen, _ = kmeans2(pix[idx], k, minit="++", seed=0, iter=30)
     return np.clip(cen.round().astype(int), 0, 255)
+
+
+def auto_palette(pixels, k, seed=0):
+    """S3 palette: Lab over-cluster, protected merge, blend absorption, Lloyd.
+
+    Over-clusters in CIELAB (k = max(2N, 16)), agglomeratively merges the closest
+    pair, never merges a saturated (chroma > 25) cluster into a neutral one,
+    absorbs small (< 2 %) clusters lying within ``dE 6`` of the segment between
+    two others (anti-alias blends), then polishes with Lloyd iterations that
+    leave saturated, tiny clusters pinned.  Returns ``N <= k`` uint8 centroids.
+    """
+    lab = color.rgb2lab(np.asarray(pixels, float).reshape(1, -1, 3) / 255.0).reshape(-1, 3)
+    if len(lab) > 200000:
+        lab = lab[np.random.default_rng(seed).choice(len(lab), 200000, replace=False)]
+    with warnings.catch_warnings():                       # empty clusters expected
+        warnings.simplefilter("ignore")
+        cen = list(kmeans2(lab, max(2 * k, 16), minit="++", seed=seed, iter=30)[0])
+    share = np.bincount(((lab[:, None] - np.array(cen)) ** 2).sum(2).argmin(1),
+                        minlength=len(cen)).astype(float)
+    share = list(share / share.sum())
+
+    def chroma(c):
+        return float(np.hypot(c[1], c[2]))
+
+    def hue(c):
+        return float(np.degrees(np.arctan2(c[2], c[1])))
+
+    def saturated(c):
+        """Most saturated cluster of its hue: never averaged away."""
+        return chroma(c) > 25 and not any(
+            chroma(o) > chroma(c) + 10 and abs((hue(c) - hue(o) + 180) % 360 - 180) < 40
+            for o in cen)
+
+    def mergeable(a, b):
+        # a saturated and a neutral cluster are different threads: never merge
+        return not (chroma(a) > 25 > chroma(b) or chroma(b) > 25 > chroma(a))
+
+    def point_seg_dist(p, a, b):
+        d = b - a
+        t = 0.0 if d @ d < 1e-9 else float(np.clip((p - a) @ d / (d @ d), 0, 1))
+        return float(np.linalg.norm(p - (a + t * d)))
+
+    def merge(i, j):
+        total = share[i] + share[j]
+        cen[i] = (cen[i] * share[i] + cen[j] * share[j]) / total
+        share[i] = total
+        del cen[j], share[j]
+
+    def blend():
+        """Small non-saturated cluster lying on the segment of two others."""
+        best = None
+        for i in range(len(cen)):
+            if share[i] >= 0.02 or saturated(cen[i]):
+                continue
+            for j in range(len(cen)):
+                for m in range(j + 1, len(cen)):
+                    if i in (j, m):
+                        continue
+                    d = point_seg_dist(cen[i], cen[j], cen[m])
+                    if d <= 6 and (best is None or d < best[0]):
+                        near = (j if np.linalg.norm(cen[i] - cen[j]) <= np.linalg.norm(cen[i] - cen[m])
+                                else m)
+                        best = (d, i, near)
+        return best
+
+    def closest_pair():
+        cand = [(float(np.linalg.norm(cen[i] - cen[j])), i, j)
+                for i in range(len(cen)) for j in range(i + 1, len(cen))
+                if mergeable(cen[i], cen[j])]
+        if not cand:                                      # all pairs forbidden
+            cand = [(float(np.linalg.norm(cen[i] - cen[j])), i, j)
+                    for i in range(len(cen)) for j in range(i + 1, len(cen))]
+        return min(cand)[1:]
+
+    while True:                                           # merge, drop final blends
+        n, b = len(cen), blend()
+        if b is not None and n > 3:
+            merge(b[1], b[2])
+        elif n > k:
+            merge(*closest_pair())
+        else:
+            break
+    while len(cen) > 2:                                   # drop fuzz below target
+        bad = next((i for i in range(len(cen)) if share[i] < 0.02 and not saturated(cen[i])), None)
+        if bad is not None:
+            near = min((q for q in range(len(cen)) if q != bad),
+                       key=lambda q: np.linalg.norm(cen[bad] - cen[q]))
+            merge(bad, near)
+        else:
+            break
+
+    pin, cents = [saturated(c) for c in cen], np.array(cen)
+    for _ in range(20):                                   # Lloyd polish in Lab
+        cl = ((lab[:, None] - cents) ** 2).sum(2).argmin(1)
+        new = cents.copy()
+        for c in range(len(cents)):
+            m = cl == c
+            if m.any() and not (pin[c] and m.sum() < 0.001 * len(lab)):
+                new[c] = lab[m].mean(0)
+        if np.allclose(new, cents, atol=1e-4):
+            break
+        cents = new
+    rgb = color.lab2rgb(cents.reshape(1, -1, 3)).reshape(-1, 3) * 255
+    return np.clip(rgb.round(), 0, 255).astype(np.uint8)
 
 
 def _rgb_str(v):
@@ -511,16 +657,42 @@ def build_palette(img, scale, border, settings):
     if len(interior_pix) == 0:
         sys.exit("error: no opaque pixels to digitize (image is fully transparent?)")
 
-    centroids = kmeans_palette(interior_pix, settings.n_colors)
-
-    # assign every pixel to its nearest centroid.  Transparent pixels are labelled
-    # too, but both consumers intersect `silhouette` first, so those labels are
-    # simply discarded -- there is no need to keep them for any other reason.
+    # Palette source: a pinned list, the S3 Lab palette (default), or legacy RGB k-means.
+    mode = "pinned" if settings.palette else settings.palette_mode
     H, W = img.H, img.W
-    flat_all = img.rgb.reshape(-1, 3).astype(float)
-    d2 = ((flat_all[:, None, :] - centroids[None, :, :]) ** 2).sum(axis=2)
-    label_all = np.argmin(d2, axis=1).reshape(H, W)
-    del d2, flat_all
+    if mode == "pinned":
+        centroids = np.array(
+            [[int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16)] for h in settings.palette],
+            dtype=int)
+        if settings.colors_given and settings.n_colors != len(centroids):
+            print(f"note: --colors {settings.n_colors} ignored; palette pinned to "
+                  f"{len(centroids)} colour(s)")
+        # assign every pixel to the nearest pinned colour in CIELAB
+        lab_all = color.rgb2lab(img.rgb.astype(float) / 255.0).reshape(-1, 3)
+        lab_cen = color.rgb2lab(
+            centroids.reshape(1, -1, 3).astype(float) / 255.0).reshape(-1, 3)
+        label_all = ((lab_all[:, None, :] - lab_cen[None, :, :]) ** 2).sum(axis=2) \
+            .argmin(axis=1).reshape(H, W)
+        del lab_all, lab_cen
+    else:
+        if mode == "kmeans":
+            centroids = kmeans_palette(interior_pix, settings.n_colors)
+        else:
+            # S3's blend absorption was verified on the whole opaque silhouette
+            # (RESULTS_palette.md); the ring-excluded interior can still leave a
+            # 0-component anti-alias cluster (Book Burner tan), so cluster on the
+            # full silhouette for S3.  Legacy k-means keeps the interior it always
+            # used, to stay byte-identical.
+            auto_pix = img.rgb[img.silhouette] if img.has_transparency else interior_pix
+            centroids = auto_palette(auto_pix, settings.n_colors)
+
+        # assign every pixel to its nearest centroid.  Transparent pixels are labelled
+        # too, but both consumers intersect `silhouette` first, so those labels are
+        # simply discarded -- there is no need to keep them for any other reason.
+        flat_all = img.rgb.reshape(-1, 3).astype(float)
+        d2 = ((flat_all[:, None, :] - centroids.astype(float)[None, :, :]) ** 2).sum(axis=2)
+        label_all = np.argmin(d2, axis=1).reshape(H, W)
+        del d2, flat_all
 
     # k-means returns duplicate and empty clusters when the image has fewer distinct
     # colours than --colors, which leaves `order`/`skip_colors` unable to address
@@ -532,32 +704,37 @@ def build_palette(img, scale, border, settings):
     label_all = _inv[label_all]
     _used = np.bincount(label_all[img.silhouette].ravel(), minlength=len(centroids))
     if not _used.all():
+        _dropped = [hexkey(centroids[i]) for i in range(len(centroids)) if not _used[i]]
         _keep = _used > 0
         _remap = np.full(len(centroids), -1, dtype=np.int32)
         _remap[_keep] = np.arange(int(_keep.sum()), dtype=np.int32)
         label_all = _remap[label_all]
         centroids = centroids[_keep]
-    if len(centroids) < settings.n_colors:
+        if mode == "pinned":
+            print("note: pinned colour(s) with no pixels dropped: " + ", ".join(_dropped))
+    if mode != "pinned" and len(centroids) < settings.n_colors:
         print(f"note: image has {len(centroids)} distinct colours, fewer than --colors {settings.n_colors}")
 
-    # merge visually identical clusters (k-means splits near-black pixels into e.g.
-    # (0,1,1) and (2,2,2)) so the design doesn't stitch two indistinguishable
-    # threads and waste a colour change
-    _MERGE_DIST = 20.0
-    _keep = []
-    for i in range(len(centroids)):
-        for j in _keep:
-            if np.linalg.norm(centroids[i].astype(float) - centroids[j].astype(float)) < _MERGE_DIST:
-                label_all[label_all == i] = j
-                break
-        else:
-            _keep.append(i)
-    if len(_keep) < len(centroids):
-        _remap = np.full(len(centroids), -1, dtype=np.int32)
-        for _new, _old in enumerate(_keep):
-            _remap[_old] = _new
-        label_all = _remap[label_all]
-        centroids = centroids[_keep]
+    # Legacy RGB k-means splits near-black pixels into e.g. (0,1,1) and (2,2,2);
+    # merge those so the design doesn't stitch two indistinguishable threads.  The
+    # pinned palette is explicit and the S3 palette already merges in Lab, so both
+    # skip this RGB-distance pass.
+    if mode == "kmeans":
+        _MERGE_DIST = 20.0
+        _keep = []
+        for i in range(len(centroids)):
+            for j in _keep:
+                if np.linalg.norm(centroids[i].astype(float) - centroids[j].astype(float)) < _MERGE_DIST:
+                    label_all[label_all == i] = j
+                    break
+            else:
+                _keep.append(i)
+        if len(_keep) < len(centroids):
+            _remap = np.full(len(centroids), -1, dtype=np.int32)
+            for _new, _old in enumerate(_keep):
+                _remap[_old] = _new
+            label_all = _remap[label_all]
+            centroids = centroids[_keep]
 
     cluster_rgb = centroids
 
@@ -957,8 +1134,12 @@ def el(id_, fill_rgb, d, settings, spacing=None, trim_after=False, angle=None):
     rs = spacing if spacing is not None else settings.row_spacing_mm
     trim = 'inkstitch:trim_after="true" ' if trim_after else ""
     ang = f'inkstitch:angle="{angle:g}" ' if angle is not None else ""
+    # Pin the params the legacy version-0 update used to inject, so a version-4
+    # file stitches the same tatami rows: 3 mm max stitch (samples sew 3.0 mm)
+    # and 1.5 mm travel between fill rows.
     return (f'<path id="{id_}" style="fill:{hx};stroke:none" fill-rule="evenodd" '
             f'inkstitch:row_spacing_mm="{rs}" {ang}'
+            f'inkstitch:max_stitch_length_mm="3" inkstitch:running_stitch_length_mm="1.5" '
             f'inkstitch:fill_underlay_skip_last="true" {trim}d="{d}"/>')
 
 
@@ -979,8 +1160,8 @@ def satin_el(id_, stroke_rgb, d, width_px, scale, settings, trim_after=False):
 def emit_svg(out, objs, trim_after, img, scale, settings):
     """Write the Ink/Stitch SVG.
 
-    Later changes land here: ``inkstitch_svg_version`` metadata and explicit
-    stitch params are added to the header/fill elements.
+    Emits version-4 metadata so Ink/Stitch does not run its legacy updates, and
+    pins the fill stitch params the update used to inject (see ``el``).
     """
     W, H = img.W, img.H
     p = []
@@ -997,6 +1178,15 @@ def emit_svg(out, objs, trim_after, img, scale, settings):
         f'  <sodipodi:namedview id="namedview1" pagecolor="#ffffff" units="mm" '
         f'inkscape:document-units="mm" pagewidth="{scale.Wmm:.2f}" pageheight="{scale.Hmm:.2f}" '
         'inkscape:pageopacity="0.0" inkscape:pagecheckerboard="0" showgrid="false"/>\n'
+    )
+    # Version-4 metadata stops Ink/Stitch treating the file as unversioned (which
+    # pops the "Unversioned Ink/Stitch SVG file detected" dialog and runs the
+    # legacy updates).  collapse_len_mm=3 matches what svg_digitize.py writes.
+    p.append(
+        '  <metadata id="metadata1">'
+        '<inkstitch:inkstitch_svg_version>4</inkstitch:inkstitch_svg_version>'
+        '<inkstitch:collapse_len_mm>3</inkstitch:collapse_len_mm>'
+        '</metadata>\n'
     )
     idx = 0
     current_group = None

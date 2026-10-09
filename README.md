@@ -23,7 +23,7 @@
 
 ```mermaid
 flowchart LR
-    A[Raster image<br/>WebP · PNG · JPG] --> B[Colour separation<br/>k-means posterize]
+    A[Raster image<br/>WebP · PNG · JPG] --> B[Colour separation<br/>Lab palette · pinned / auto]
     B --> C{Vectorize}
     C -->|fills| D[Closed fill regions<br/>holes preserved]
     C -->|thin dark linework| E[Skeletonize into satin columns<br/>width follows line thickness]
@@ -69,7 +69,7 @@ Output lands in `work/`: `<name>.svg` (editable, opens in Inkscape) and `<name>.
 ## How it works
 
 1. **Classify** — transparent backgrounds are treated as patches (alpha silhouette + detected satin border); opaque art drops the lightest cluster as "paper" and routes the darkest to outlines.
-2. **Denoise + posterize** — median filter, then k-means down to `--colors` flat thread colours.
+2. **Denoise + palette** — median filter, then flat thread colours: pinned `palette:` hexes assigned in Lab, or an automatic Lab palette (S3; `--palette-mode kmeans` for the legacy RGB k-means), bounded by `--colors`.
 3. **Vectorize** — each colour becomes closed `fill` regions with holes preserved (`fill-rule="evenodd"`); sub-mm specks are dropped.
 4. **Outlines → satin** — thin runs of the outline colour are skeletonized into centre lines and emitted as satin columns that widen to match the local stroke.
 5. **Order + trim** — layers keep their light → dark order; within a layer, components are swept nearest-neighbour from the carried needle position, then long or exposed jumps are cut.
