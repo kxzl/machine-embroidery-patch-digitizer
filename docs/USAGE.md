@@ -76,6 +76,10 @@ put on `PYTHONPATH` automatically by `run.sh` for the Ink/Stitch export step.
 | `--density MM` | `0.4` raster / `0.3` SVG | Default fill row spacing (mm). Keep in `0.3–0.6`; below breaks needles, above leaves gaps. The SVG path defaults to `0.3` because `0.4` left the base fabric visible on the Scavenger's Daughter test. **An explicit density (CLI or YAML) overrides the `row_spacing_mm` authored on the artwork** — the Scavenger's paths ship `0.4`, which otherwise silently wins and reopens the gaps. |
 | `--no-satin-outlines` | off | Keep the darkest colour entirely as fill instead of turning thin linework into satin. |
 | `--satin-max-mm W` | `2.5` | Regions of the outline colour thicker than this stay fills (not outlines). |
+| `--underlap-mm N` | `0.6` | Grow every fill up to N mm under the layers stitched after it (later fills, satin outlines, satin border), clipped to the silhouette. Closes the colour seams and the fill/border gap that fabric pull opens. `0` disables and reproduces the pre-underlap output byte-for-byte. |
+| `--raster-pull-mm N` | `0` | Stretch each fill N mm along its stitch-row angle (`--fill-angle` / YAML `angle` / 0), clipped to the silhouette **grown** by N, so overshooting the outer edge by N is intended. Compensates the pull that narrows a fill along its rows; this is the fast replacement for Ink/Stitch's own `pull_compensation_mm` on fills (see the caveat below). `0` disables; the vadmel profile sets `0.25`. |
+| `--profile NAME` | none | Select a named fabric profile (`vadmel`). Sets density, underlap, raster pull and underlay unless each is overridden by an explicit CLI flag or YAML key. See **Fabric profiles**. |
+| `--no-skip-last` | off | Fill underlay stitches every row instead of skipping the last one (drops `inkstitch:fill_underlay_skip_last`). YAML `fill_underlay_skip_last: false` / `no_skip_last: true` are equivalent; the vadmel profile sets it. |
 | `--size-mm N` | `100` | Longest side of the finished design (mm). Scales the design's own bounds (alpha silhouette for transparent art, non-background bbox for opaque art), not the image canvas. |
 | `--overlap-mm N` | `1.0` | SVG inputs: a later colour may overlap an earlier one by at most this much — under-colours are carved out from beneath later colours (a later colour can still cover an earlier one by up to `2 x N` where the later shape is thin). After the carve, fragments fully hidden under a later colour are dropped entirely (they were bare stubs that each cost underlay + tie stitches). `0` disables the carve. |
 | `--seam-pull-mm MM` | `0.2` | SVG inputs: thread is laid *centred* on its path, so a fill's **stitched** edge finishes half a thread width outside the drawn edge and eats the earlier colour's detail there (measured on the Scavenger's Daughter artwork: 19 % of the visible green). Pull every later colour back by this much along the colour edges so its stitched edge lands on the drawn edge. Only where a later colour abuts an earlier one — the outer silhouette and white highlights are untouched. `0` disables it. |
@@ -86,7 +90,7 @@ put on `PYTHONPATH` automatically by `run.sh` for the Ink/Stitch export step.
 | `--no-trim` | off | Trimming is **on by default**; this disables it. |
 | `--trim` | on | Explicitly enable trimming (already the default; also overrides `trim.enabled: false` in a YAML config). |
 | `--trim-mm N` | `4.0` | Cut a jump longer than this (mm); `0` = cut every long/exposed jump. Jumps under 2 mm are always skipped. |
-| `--config F` | — | Per-image YAML config (`order`, `skip_colors`, `density`, `border`, `trim`, `palette`, `palette_mode`). CLI flags win over its values. Generate a starter with `tools/digitize/make_config.py <image>`, which also parses the `**Palette:**` line from `patch_descriptions/prompts/<name>.md` into `palette:` when one exists. |
+| `--config F` | none | Per-image YAML config (`order`, `skip_colors`, `density`, `angle`, `border`, `trim`, `palette`, `palette_mode`, `profile`, `underlap_mm`, `raster_pull_mm`, `fill_underlay_skip_last`, `fill_underlay_double`, `satin_underlay`, `border_zigzag_spacing_mm`, `fabric_color`). CLI flags win over its values. Generate a starter with `tools/digitize/make_config.py <image>`, which also parses the `**Palette:**` line from `patch_descriptions/prompts/<name>.md` into `palette:` when one exists. |
 | `--no-export` | off | `run.sh` only: stop after writing the SVG, skip the Ink/Stitch VP3 export. Not forwarded to `vectorize.py`. |
 | (positional) input | — | Path to the source image (`.webp`/`.png`/`.jpg`). |
 | (positional) output | `work/design.svg` | Output SVG path. |
@@ -125,6 +129,44 @@ this to judge stitch layout and alignment) and `<name>_coverage.png` (1600 px,
 `--thread-mm 0.5`, the 40 wt thread's flattened width — use this to judge
 whether the fabric will show through). Both are drawn on the `--background`
 colour.
+
+---
+
+## Fabric profiles
+
+A profile bundles the fill/satin settings that differ by fabric. `--profile NAME`
+(CLI) or `profile: NAME` (YAML) selects one. Precedence is **CLI flag > explicit
+YAML key > profile > built-in default**, so a profile is a starting point you can
+still override key by key.
+
+| Profile | Fabric | What it changes |
+|---|---|---|
+| `vadmel` | black felted wool (65 % wool / 25 % nylon / 10 % polyester) on stiff stabiliser | density `0.35`; underlap `0.6`; raster pull `0.25`; keeps every fill-underlay row (`fill_underlay_skip_last` off); a perpendicular double underlay (`fill_underlay_angle="<a+90> <a>"`) on fills whose CIELAB **L\* > 70** (light thread on dark fabric); centre-walk + contour underlay on the outline and border satins (`contour_underlay_inset_mm 0.4`); border `zigzag_spacing_mm 0.35`; preview `fabric_color` `#101010`. |
+
+`vectorize.py` prints the resolved profile values to stdout. The profile's
+`fabric_color` is only a default: set `fabric_color:` explicitly in YAML to
+override it. `run.sh` resolves `profile: vadmel` in the YAML config → `#101010`
+for the preview canvas when the config has no `fabric_color`, so the
+profile-implied dark background reaches `preview.py`. A profile selected only with
+`--profile` on the command line does not change the preview canvas: put
+`profile:` in the YAML, or pass `--background` explicitly.
+
+The vadmel numbers come from `work/review_artifacts/RESEARCH_vadmel.md`; the
+fabric-specific ones are extrapolated, so calibrate with `tools/digitize/swatch.py`
+before trusting them.
+
+```yaml
+# work/example.yaml
+profile: vadmel
+palette: ["#1A1A1A", "#B5651D"]
+border:
+  mode: force_black
+```
+
+```bash
+# CLI wins over the profile: density 0.4 instead of vadmel's 0.35
+tools/digitize/run.sh --profile vadmel --density 0.4 --config work/example.yaml image.png
+```
 
 ---
 
@@ -237,7 +279,10 @@ These live at the top of `tools/digitize/vectorize.py` and are not CLI flags
    (S3 Lab over-cluster + protected merge by default; `--palette-mode kmeans`
    for the legacy RGB k-means). `--colors` bounds the automatic palette.
 3. **Vectorize**: each color becomes closed `fill` regions with holes preserved
-   (`fill-rule="evenodd"`); sub-mm components/holes are dropped.
+   (`fill-rule="evenodd"`); sub-mm components/holes are dropped. The cleaned
+   masks are then fabric-compensated: **underlap** grows each fill under the
+   layers stitched after it (`--underlap-mm`, default on at 0.6 mm), and
+   **raster pull** stretches each fill along its row angle (`--raster-pull-mm`).
 4. **Outlines → satin**: the darkest colour's *thin* regions (thinner than
    `--satin-max-mm`) are skeletonized into centerlines and emitted as simple
    satin columns whose width follows the local line thickness; its solid regions
@@ -266,9 +311,15 @@ Stitch order: fills (bottom, light→dark) → satin outlines → satin border (
   thin lines become satin and solid areas stay fills. If a design's outlines are
   not the darkest colour, edit the `order`/`skip_colors` YAML, or disable with
   `--no-satin-outlines`.
-- **Pull-compensation and underlay-inset are intentionally omitted for fills** —
-  they made the export hang (>20 min) via shapely buffering on the many-holed
-  polygons. Satin elements do get a small pull compensation (0.2 mm).
+- **Fill pull compensation runs in the raster, not through Ink/Stitch.** Ink/Stitch's
+  own `inkstitch:pull_compensation_mm` on fills works but rebuilds every fill polygon
+  from each tatami row and is slow: measured **136 s** (goat) and **220–271 s**
+  (Book Burner) per export, versus 8–20 s without it. The historic note here said it
+  "made the export hang (>20 min)"; that is out of date: it is slow, not hung. The
+  raster path instead stretches each fill mask along its row angle
+  (`--raster-pull-mm`), which measures at the same export time and closes
+  the pull gap just as well for tatami rows. Satin elements still get a small pull
+  compensation (0.2 mm). Don't set both: they add up.
 - **Trimming is on by default** and cuts long *and* exposed jumps (thread not
   covered by a later layer). Jumps under 2 mm are never cut. It adds tie-off/tie-in
   lock stitches (a few % more stitches) but eliminates visible jump thread.

@@ -29,6 +29,7 @@ Usage:
                                      [--trim] [--no-trim] [--trim-mm N] [--config F]
                                      [input.webp] [output.svg]
 """
+import math
 import os
 import re
 import sys
@@ -49,7 +50,8 @@ from skeleton import satin_segments
 
 _VALUE_FLAGS = {"--colors", "--border-mm", "--trim-mm", "--config", "--density",
                 "--satin-max-mm", "--size-mm", "--fill-angle", "--satinize-colors",
-                "--palette", "--palette-mode"}
+                "--palette", "--palette-mode", "--underlap-mm", "--raster-pull-mm",
+                "--profile"}
 
 # module-level defaults (docs reference these names); build_settings resolves the
 # per-run values into a Settings instance.
@@ -70,6 +72,28 @@ TOLERANCE_MM = 0.25        # polygon simplification (mm); 0.25 measured 1.5x fas
                            # export vs 0.15 with ~0.8% fewer stitches and no visible
                            # difference (docs/adr/0002-export-performance.md)
 TRIM_MIN_MM = 2.0          # never cut jumps shorter than this (Ink/Stitch adds no locks below ~3 mm)
+
+# Named fabric profiles (review.md section 2.5): reviewed starting values for one
+# fabric type.  YAML ``profile:`` / ``--profile`` selects one; an explicit CLI
+# flag or YAML key always wins over the profile, which wins over the built-in
+# default.  Only values that differ from the defaults need to be listed.
+PROFILES = {
+    "vadmel": {
+        "density": 0.35,              # black felted wool: tighter rows to close the pile
+        "underlap_mm": 0.6,
+        "raster_pull_mm": 0.25,
+        "fill_underlay_skip_last": False,   # full second underlay pass, no skipped rows
+        "fill_underlay_double_light": True,  # perpendicular second underlay for light thread
+        "satin_underlay": True,              # centre-walk + contour on border/outline satins
+        "border_zigzag_spacing_mm": 0.35,
+        "fabric_color": "#101010",           # preview canvas for run.sh
+    },
+}
+# profile values with no matching user-facing key (tunable in code only)
+PROFILE_CONSTANTS = {
+    "fill_underlay_light_l": 70.0,   # double-underlay fills whose Lab L* exceeds this
+    "satin_underlay_inset_mm": 0.4,  # contour underlay inset (mm)
+}
 
 
 @dataclass
@@ -97,6 +121,16 @@ class Settings:
     skip: set = field(default_factory=set)
     palette: list = field(default_factory=list)   # pinned thread hexes, [] = auto
     palette_mode: str = "auto"    # "auto" = S3 Lab palette, "kmeans" = legacy RGB
+    profile: str = ""             # named fabric profile, "" = none
+    underlap_mm: float = 0.6      # grow each fill under later layers (0 disables)
+    raster_pull_mm: float = 0.0   # stretch each fill along its row angle (0 disables)
+    fill_underlay_skip_last: bool = True
+    fill_underlay_double_light: bool = False
+    fill_underlay_light_l: float = 70.0
+    satin_underlay: bool = False
+    satin_underlay_inset_mm: float = 0.4
+    border_zigzag_spacing_mm: float | None = None
+    fabric_color: str = ""
     # algorithm constants (module-level defaults, overridable per class later)
     satin_min_mm: float = SATIN_MIN_MM
     satin_gate_mm: float = SATIN_GATE_MM
@@ -212,9 +246,26 @@ def _parse_palette(value):
 
 
 def build_settings(flags, cfg):
-    """Resolve CLI flags and YAML config into a Settings instance (CLI wins)."""
+    """Resolve CLI flags and YAML config into a Settings instance.
+
+    Precedence for every value: CLI flag > explicit YAML key > named profile >
+    built-in default.  ``--profile`` / YAML ``profile:`` selects a fabric profile
+    from ``PROFILES`` (currently ``vadmel``); see review.md section 2.5.
+    """
     def flag(name, default):
         return flags.get(name, default)
+
+    # --- fabric profile (lowest precedence, overridden key by key below) ------
+    _prof_arg = flag("profile", None)
+    profile = str(_prof_arg if _prof_arg is not None else cfg.get("profile") or "").strip().lower()
+    if profile and profile not in PROFILES:
+        print(f"warning: unknown profile {profile!r}; ignoring (known: {', '.join(PROFILES)})")
+        profile = ""
+    prof = PROFILES.get(profile, {})
+
+    def profile_value(key, default):
+        """Profile value if the profile sets it, else the built-in default."""
+        return prof.get(key, default)
 
     n_colors = int(flag("colors", "5"))
     colors_given = flag("colors", None) is not None
@@ -227,8 +278,49 @@ def build_settings(flags, cfg):
     no_satin = flag("no-satin-outlines", False) is True
     satin_max_arg = flag("satin-max-mm", None)
     size_mm = float(flag("size-mm", "100"))
-    row_spacing_mm = ROW_SPACING_MM
+    row_spacing_mm = float(profile_value("density", ROW_SPACING_MM))
     satin_max_mm = SATIN_MAX_MM
+
+    # --- mask compensation (underlap default on; raster pull profile-only) ----
+    _ul_arg = flag("underlap-mm", None)
+    if _ul_arg is not None:
+        underlap_mm = float(_ul_arg)
+    elif cfg.get("underlap_mm") is not None:
+        underlap_mm = float(cfg["underlap_mm"])
+    else:
+        underlap_mm = float(profile_value("underlap_mm", 0.6))
+    _rp_arg = flag("raster-pull-mm", None)
+    if _rp_arg is not None:
+        raster_pull_mm = float(_rp_arg)
+    elif cfg.get("raster_pull_mm") is not None:
+        raster_pull_mm = float(cfg["raster_pull_mm"])
+    else:
+        raster_pull_mm = float(profile_value("raster_pull_mm", 0.0))
+
+    # --- underlay options (profile turns the vadmel ones on) ------------------
+    if flag("no-skip-last", False) is True:
+        skip_last = False
+    elif cfg.get("fill_underlay_skip_last") is not None:
+        skip_last = bool(cfg["fill_underlay_skip_last"])
+    elif cfg.get("no_skip_last") is not None:
+        skip_last = not bool(cfg["no_skip_last"])
+    else:
+        skip_last = bool(profile_value("fill_underlay_skip_last", True))
+    if cfg.get("fill_underlay_double") is not None:
+        double_light = bool(cfg["fill_underlay_double"])
+    else:
+        double_light = bool(profile_value("fill_underlay_double_light", False))
+    if cfg.get("satin_underlay") is not None:
+        satin_underlay = bool(cfg["satin_underlay"])
+    else:
+        satin_underlay = bool(profile_value("satin_underlay", False))
+    _bz_cfg = cfg.get("border_zigzag_spacing_mm")
+    border_zigzag = float(_bz_cfg) if _bz_cfg is not None else prof.get("border_zigzag_spacing_mm")
+    fabric_color = str(cfg.get("fabric_color") or profile_value("fabric_color", ""))
+    fill_underlay_light_l = float(profile_value("fill_underlay_light_l",
+                                                PROFILE_CONSTANTS["fill_underlay_light_l"]))
+    satin_underlay_inset_mm = float(profile_value("satin_underlay_inset_mm",
+                                                  PROFILE_CONSTANTS["satin_underlay_inset_mm"]))
 
     # --- per-image YAML overrides (CLI always wins) ---------------------------
     if flag("trim", False) is True:
@@ -314,6 +406,13 @@ def build_settings(flags, cfg):
             print(f"warning: density {_val} mm ({_name}) is outside the safe 0.3-0.6 mm range "
                   f"(too dense breaks needles, too open leaves gaps)")
 
+    if profile:
+        print(f"profile: {profile} (density={row_spacing_mm} mm, underlap_mm={underlap_mm}, "
+              f"raster_pull_mm={raster_pull_mm}, fill_underlay_skip_last={skip_last}, "
+              f"fill_underlay_double_light={double_light} (L*>{fill_underlay_light_l:g}), "
+              f"satin_underlay={satin_underlay} (inset {satin_underlay_inset_mm} mm), "
+              f"border_zigzag_spacing_mm={border_zigzag}, fabric_color={fabric_color or 'unset'})")
+
     return Settings(
         n_colors=n_colors, colors_given=colors_given, size_mm=size_mm, no_border=no_border, border_mm=border_mm,
         border_mode=_border_mode, trim=trim, trim_threshold_mm=trim_threshold_mm,
@@ -322,7 +421,12 @@ def build_settings(flags, cfg):
         sat_max_row_mm=sat_max_row_mm, sat_max_rows=sat_max_rows,
         sat_min_coverage=sat_min_coverage, sat_max_overhang=sat_max_overhang,
         order=order, skip=skip, satin_max_mm=satin_max_mm,
-        palette=palette, palette_mode=palette_mode,
+        palette=palette, palette_mode=palette_mode, profile=profile,
+        underlap_mm=underlap_mm, raster_pull_mm=raster_pull_mm,
+        fill_underlay_skip_last=skip_last, fill_underlay_double_light=double_light,
+        fill_underlay_light_l=fill_underlay_light_l, satin_underlay=satin_underlay,
+        satin_underlay_inset_mm=satin_underlay_inset_mm,
+        border_zigzag_spacing_mm=border_zigzag, fabric_color=fabric_color,
     )
 
 
@@ -802,11 +906,10 @@ def mask_for(c, palette, img, border, settings, use_border_exclusion=False):
 
 
 def build_masks(img, border, palette, fill_colors, lw, settings):
-    """Per-colour cleaned masks, with the border ring excluded before filling.
+    """Base per-colour cleaned masks, with the border ring excluded before filling.
 
-    Later changes land here: palette pinning only changes ``palette`` upstream;
-    underlap (grow each fill under later-stitched layers) and raster pull
-    (stretch each mask along its row angle) both operate on this dict.
+    Fabric compensation (underlap + raster pull) is applied on top by
+    ``compensate_masks`` once the satin-outline cover is known.
     """
     masks = {}
     for c in fill_colors:
@@ -815,6 +918,64 @@ def build_masks(img, border, palette, fill_colors, lw, settings):
     if lw is not None and lw not in masks:
         masks[lw] = mask_for(lw, palette, img, border, settings,
                              use_border_exclusion=img.has_transparency)
+    return masks
+
+
+def _line_struct(angle_deg, r):
+    """Boolean (2r+1)^2 structuring element: a 1-px line at ``angle_deg``."""
+    st = np.zeros((2 * r + 1, 2 * r + 1), dtype=bool)
+    t = math.radians(angle_deg)
+    for k in range(-r, r + 1):
+        st[int(round(r - k * math.sin(t))), int(round(r + k * math.cos(t)))] = True
+    return st
+
+
+def compensate_masks(masks, img, scale, border, palette, fill_colors, lw_cover, settings):
+    """Fabric compensation on the cleaned masks (review.md 2.1, 2.3).
+
+    Must run after the satin-outline cover is known (``lw_cover``) and before the
+    masks are contoured, so the trim hidden-test and ``stitch_index`` see exactly
+    the stitched shapes.
+
+    * **Underlap** grows each fill up to ``underlap_mm`` under everything that
+      stitches after it (later fills, the satin-outline cover, the border ring),
+      clipped to the silhouette, walking from the top layer down.
+    * **Raster pull** stretches each fill by ``raster_pull_mm`` along its
+      stitch-row angle (FILL_ANGLE / YAML angle / 0), clipped to the silhouette
+      grown by the same amount -- overshooting the outer edge is intended.
+    """
+    if settings.underlap_mm <= 0 and settings.raster_pull_mm <= 0:
+        return masks
+
+    H, W = img.H, img.W
+    px_per_mm = scale.px_per_mm
+
+    ul_px = int(round(settings.underlap_mm * px_per_mm))
+    if ul_px > 0:
+        later = np.zeros((H, W), dtype=bool)
+        if lw_cover is not None:
+            later |= lw_cover
+        if border.ring is not None:
+            later |= border.ring
+        for c in reversed(fill_colors):     # walk from the top layer down
+            m0 = masks[c]                   # base mask: later fills stay un-grown
+            masks[c] = m0 | (ndimage.binary_dilation(m0, structure=morphology.disk(ul_px))
+                             & later & img.silhouette)
+            later |= m0
+        print(f"underlap: each fill grows up to {settings.underlap_mm} mm under "
+              f"later fills / satin outlines / border")
+
+    rp_px = int(round(settings.raster_pull_mm * px_per_mm))
+    if rp_px > 0:
+        sil_grow = ndimage.binary_dilation(img.silhouette, structure=morphology.disk(rp_px))
+        for c in fill_colors:
+            angle = settings.fill_angle
+            if angle is None:
+                angle = settings.angle_map.get(hexkey(palette.centroids[c]).lower(), 0.0)
+            masks[c] = masks[c] | (ndimage.binary_dilation(
+                masks[c], structure=_line_struct(angle or 0.0, rp_px)) & sil_grow)
+        print(f"raster pull compensation: fills stretched {settings.raster_pull_mm} mm "
+              f"along their stitch rows")
     return masks
 
 
@@ -1134,16 +1295,27 @@ def el(id_, fill_rgb, d, settings, spacing=None, trim_after=False, angle=None):
     rs = spacing if spacing is not None else settings.row_spacing_mm
     trim = 'inkstitch:trim_after="true" ' if trim_after else ""
     ang = f'inkstitch:angle="{angle:g}" ' if angle is not None else ""
+    # Underlay: default skips the last row (density on stable twill).  The vadmel
+    # profile keeps every row and adds a perpendicular second pass on light thread
+    # (L* above the threshold), which the research says stops the pile showing.
+    underlay = ('inkstitch:fill_underlay_skip_last="true" '
+                if settings.fill_underlay_skip_last else "")
+    if settings.fill_underlay_double_light:
+        _l = float(color.rgb2lab(np.asarray(fill_rgb, float).reshape(1, 1, 3) / 255.0)[0, 0, 0])
+        if _l > settings.fill_underlay_light_l:
+            _a = angle if angle is not None else 0.0
+            underlay += f'inkstitch:fill_underlay_angle="{_a + 90:g} {_a:g}" '
     # Pin the params the legacy version-0 update used to inject, so a version-4
     # file stitches the same tatami rows: 3 mm max stitch (samples sew 3.0 mm)
     # and 1.5 mm travel between fill rows.
     return (f'<path id="{id_}" style="fill:{hx};stroke:none" fill-rule="evenodd" '
             f'inkstitch:row_spacing_mm="{rs}" {ang}'
             f'inkstitch:max_stitch_length_mm="3" inkstitch:running_stitch_length_mm="1.5" '
-            f'inkstitch:fill_underlay_skip_last="true" {trim}d="{d}"/>')
+            f'{underlay}{trim}d="{d}"/>')
 
 
-def satin_el(id_, stroke_rgb, d, width_px, scale, settings, trim_after=False):
+def satin_el(id_, stroke_rgb, d, width_px, scale, settings, trim_after=False,
+             underlay=False, zigzag_mm=None):
     w_mm = width_px / scale.px_per_mm
     if w_mm <= settings.satin_gate_mm:      # Ink/Stitch's test is strictly `>`
         # would be emitted as satin_column and then silently stitched as running
@@ -1153,8 +1325,13 @@ def satin_el(id_, stroke_rgb, d, width_px, scale, settings, trim_after=False):
     trim = 'inkstitch:trim_after="true" ' if trim_after else ""
     pull = (f'inkstitch:pull_compensation_mm="{settings.satin_pull_mm} {settings.satin_pull_mm}" '
             if settings.satin_pull_mm else "")
+    u = ""
+    if underlay:
+        u = ('inkstitch:center_walk_underlay="true" inkstitch:contour_underlay="true" '
+             f'inkstitch:contour_underlay_inset_mm="{settings.satin_underlay_inset_mm:g}" ')
+    zz = f'inkstitch:zigzag_spacing_mm="{zigzag_mm:g}" ' if zigzag_mm else ""
     return (f'<path id="{id_}" style="fill:none;stroke:{hx};stroke-width:{width_px:.2f}" '
-            f'inkstitch:satin_column="true" {pull}{trim}d="{d}"/>')
+            f'inkstitch:satin_column="true" {pull}{u}{zz}{trim}d="{d}"/>')
 
 
 def emit_svg(out, objs, trim_after, img, scale, settings):
@@ -1198,8 +1375,12 @@ def emit_svg(out, objs, trim_after, img, scale, settings):
                      f'id="{o["group_id"]}">\n')
             current_group = o["group_id"]
         if o["satin"]:
+            gid = o["group_id"]
+            underlay = settings.satin_underlay and gid in ("outlines", "border")
+            zigzag = settings.border_zigzag_spacing_mm if gid == "border" else None
             p.append("    " + satin_el(f"s{idx}", o["rgb"], o["d"], o["width_px"],
-                                       scale, settings, trim_after=tm) + "\n")
+                                       scale, settings, trim_after=tm,
+                                       underlay=underlay, zigzag_mm=zigzag) + "\n")
         else:
             p.append("    " + el(f"f{idx}", o["rgb"], o["d"], settings, spacing=o["spacing"],
                                   trim_after=tm, angle=o.get("angle")) + "\n")
@@ -1242,6 +1423,8 @@ def main(argv=None):
     fill_colors, lw = order_colors(palette, settings)
     masks = build_masks(img, border, palette, fill_colors, lw, settings)
     outline_items, lw_cover = outline_satins(img, scale, masks, palette, lw, settings)
+    masks = compensate_masks(masks, img, scale, border, palette, fill_colors,
+                             lw_cover, settings)
     color_items, color_keep_lab, satinized_satins, satinized_polys = fill_components(
         img, scale, border, palette, masks, fill_colors, lw, lw_cover, settings)
     objs, stitch_index = order_objects(

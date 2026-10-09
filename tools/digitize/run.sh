@@ -10,8 +10,12 @@
 #   --seam-pull-mm MM  (svg inputs: pull a later colour back off a colour edge so
 #                   its thread finishes on the drawn edge; default 0.2)
 #   --fill-angle DEG | --satinize-colors HEX[,HEX]  (both paths)
+#   --underlap-mm N | --raster-pull-mm N  (raster fills: fabric compensation;
+#                   underlap default 0.6 mm, raster pull default 0)
+#   --profile NAME  (raster fills: fabric profile, e.g. vadmel -> density 0.35,
+#                   underlap 0.6, raster pull 0.25, full/satin underlay)
 #   --background HEX  (preview canvas colour; default: --config's fabric_color:,
-#                      else white)
+#                      else the profile's, else white)
 #   --no-export   (skip the Ink/Stitch VP3 export, produce SVG only)
 set -euo pipefail
 
@@ -31,7 +35,8 @@ while [[ $# -gt 0 ]]; do
     --*=*) FLAGS+=("$a") ;;
     --colors|--border-mm|--trim-mm|--density|--satin-max-mm|--size-mm|\
     --overlap-mm|--seam-pull-mm|--width-mm|--height-mm|--border-color|--skip-colors|\
-    --fill-angle|--satinize-colors|--palette|--palette-mode)
+    --fill-angle|--satinize-colors|--palette|--palette-mode|\
+    --underlap-mm|--raster-pull-mm|--profile)
       FLAGS+=("$a" "$1"); shift ;;
     --key-background) KEY_BG=1 ;;
     --no-export) NO_EXPORT=1 ;;
@@ -44,7 +49,8 @@ done
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-# preview canvas colour: --background wins, else the config's fabric_color:
+# preview canvas colour: --background wins, else the config's fabric_color:, else
+# the fabric colour implied by the config's profile: (vadmel -> #101010).
 if [[ -z "$BACKGROUND" && -n "$CONFIG" ]]; then
   BACKGROUND="$(.venv/bin/python - "$CONFIG" <<'PY'
 import sys
@@ -53,7 +59,10 @@ try:
     cfg = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
 except Exception:
     cfg = {}
-print((cfg.get("fabric_color") or "").strip())
+bg = str(cfg.get("fabric_color") or "").strip()
+if not bg and str(cfg.get("profile") or "").strip().lower() == "vadmel":
+    bg = "#101010"
+print(bg)
 PY
 )"
 fi
@@ -75,8 +84,9 @@ if [[ "$EXT_LC" == "svg" ]]; then
   while [[ $i -lt ${#FLAGS[@]} ]]; do
     a="${FLAGS[$i]}"
     case "$a" in
-      --palette|--palette-mode) i=$((i + 1)) ;;
-      --palette=*|--palette-mode=*) ;;
+      --palette|--palette-mode|--underlap-mm|--raster-pull-mm|--profile) i=$((i + 1)) ;;
+      --palette=*|--palette-mode=*|--underlap-mm=*|--raster-pull-mm=*|--profile=*) ;;
+      --no-skip-last) ;;
       *) FWD+=("$a") ;;
     esac
     i=$((i + 1))
