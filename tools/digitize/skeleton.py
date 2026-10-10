@@ -140,7 +140,7 @@ def _extend_ends(chains, dist, junctions, free_ext, clip, out_dist):
 
 
 def satin_segments(thin, px_per_mm, min_len_mm, wmin_mm, wmax_mm, tolerance,
-                   extend_ends=False, free_ext_mm=0.3):
+                   extend_ends=False, free_ext_mm=0.3, raw_widths=False):
     """Skeletonize a mask into (path_d, point_array, width_px) satin candidates.
 
     Segments whose own median width exceeds ``wmax_mm`` are the cores of solid
@@ -150,6 +150,9 @@ def satin_segments(thin, px_per_mm, min_len_mm, wmin_mm, wmax_mm, tolerance,
     With ``extend_ends`` the polyline ends are pushed outward first: junction
     ends by half the local line width, free ends by ``free_ext_mm`` (see
     ``_extend_ends``).  Default ``False`` leaves the output byte-identical.
+
+    With ``raw_widths`` each result is a 4-tuple ``(path_d, points, width_px, raw_px)``
+    where ``raw_px`` is the measured width before widening to ``wmin_mm``.
     """
     skel = morphology.skeletonize(thin)
     dist = ndimage.distance_transform_edt(thin)
@@ -192,7 +195,7 @@ def satin_segments(thin, px_per_mm, min_len_mm, wmin_mm, wmax_mm, tolerance,
             poly = arr
         w = max(w_raw, wmin)
         d = "M " + " L ".join(f"{x:.1f},{y:.1f}" for y, x in poly)
-        segs.append((d, poly, w))
+        segs.append((d, poly, w, w_raw) if raw_widths else (d, poly, w))
     return segs
 
 

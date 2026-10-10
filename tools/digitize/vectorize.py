@@ -137,6 +137,8 @@ class Settings:
     border_zigzag_spacing_mm: float | None = None
     fabric_color: str = ""
     gradients: list = field(default_factory=list)   # [{name, stops, min_area_mm2, min_r2, row_spacing_mm}]
+    thin_lines: str = "widen"     # outline runs under the satin gate: "widen" to satin, or "run" = bean stitch
+    outline_order: str = "centroid"   # outline stitch order: by "centroid" (default) or by path "endpoint"
     # algorithm constants (module-level defaults, overridable per class later)
     satin_min_mm: float = SATIN_MIN_MM
     satin_gate_mm: float = SATIN_GATE_MM
@@ -430,6 +432,26 @@ def build_settings(flags, cfg):
     sat_min_coverage = float(_sat_cfg.get("min_coverage", 0.9))
     sat_max_overhang = float(_sat_cfg.get("max_overhang", 0.45))
 
+    # --- thin_lines: what to do with outline runs thinner than the satin gate -----
+    _thin = str(cfg.get("thin_lines", "widen")).strip().lower()
+    if _thin not in ("widen", "run"):
+        print(f"warning: ignoring thin_lines {_thin!r} (use widen or run)")
+        _thin = "widen"
+
+    # --- trim.min_mm: jumps up to this length are never cut (Ink/Stitch adds no
+    # lock stitches for gaps under its 3 mm collapse length) ----------------------
+    try:
+        _trim_min = float((cfg.get("trim") or {}).get("min_mm", TRIM_MIN_MM))
+    except (TypeError, ValueError):
+        print("warning: ignoring non-numeric trim.min_mm")
+        _trim_min = TRIM_MIN_MM
+
+    # --- outline_order: how the outline segments are sequenced -------------------
+    _oo = str(cfg.get("outline_order", "centroid")).strip().lower()
+    if _oo not in ("centroid", "endpoint"):
+        print(f"warning: ignoring outline_order {_oo!r} (use centroid or endpoint)")
+        _oo = "centroid"
+
     # --- gradients: regions stitched as one Ink/Stitch linear gradient fill -----
     _gradients = []
     _grad_cfg = cfg.get("gradients") or []
@@ -475,7 +497,8 @@ def build_settings(flags, cfg):
         fill_underlay_light_l=fill_underlay_light_l, satin_underlay=satin_underlay,
         satin_underlay_inset_mm=satin_underlay_inset_mm,
         border_zigzag_spacing_mm=border_zigzag, fabric_color=fabric_color,
-        gradients=_gradients,
+        gradients=_gradients, thin_lines=_thin, outline_order=_oo,
+        trim_min_mm=_trim_min,
     )
 
 
@@ -1180,9 +1203,17 @@ def outline_satins(img, scale, masks, palette, lw, settings):
         return outline_items, lw_cover
 
     lw_mask = masks[lw]
+    thin_run = settings.thin_lines == "run"
     segs = satin_segments(lw_mask, scale.px_per_mm, settings.satin_min_len_mm,
                           settings.satin_min_mm, settings.satin_max_mm, scale.tolerance,
-                          extend_ends=settings.satin_extend)
+                          extend_ends=settings.satin_extend, raw_widths=thin_run)
+    runs = []
+    if thin_run:
+        # runs thinner than the satin gate stitch as a bean-stitch line along the
+        # centre line instead of a satin widened to satin_min_mm
+        gate_px = settings.satin_gate_mm * scale.px_per_mm
+        runs = [(d, poly, w_raw) for d, poly, w, w_raw in segs if w_raw < gate_px]
+        segs = [(d, poly, w) for d, poly, w, w_raw in segs if w_raw >= gate_px]
     # A satin shorter than it is wide is not stitchable: its rails are shorter
     # than the zigzag travel, and Ink/Stitch then builds a section with no
     # points and dies with "tuple index out of range" in flattened_sections.
@@ -1198,9 +1229,15 @@ def outline_satins(img, scale, masks, palette, lw, settings):
         print(f"note: dropped {len(segs) - len(_segs)} outline satin(s) shorter than "
               f"their own width ({len(segs)} -> {len(_segs)})")
     segs = _segs
-    if segs:
+    if segs or runs:
         cover_img = Image.new("L", (W, H), 0)
         cover_draw = ImageDraw.Draw(cover_img)
+        for d, poly, w_raw in runs:
+            outline_items.append(dict(cent=(float(poly[:, 0].mean()), float(poly[:, 1].mean())),
+                                      pts=poly, d=d, satin=False, stroke=True, lab_id=None,
+                                      rgb=palette.centroids[lw], spacing=None, width_px=w_raw))
+            cover_draw.line([(float(x), float(y)) for y, x in poly], fill=255,
+                            width=max(1, int(round(w_raw))), joint="curve")
         for d, poly, w in segs:
             outline_items.append(dict(cent=(float(poly[:, 0].mean()), float(poly[:, 1].mean())),
                                       pts=poly, d=d, satin=True, lab_id=None,
@@ -1211,7 +1248,8 @@ def outline_satins(img, scale, masks, palette, lw, settings):
         # band-edge mismatch with the simplified skeleton leaves sub-mm slivers
         lw_cover = ndimage.binary_dilation((np.array(cover_img) > 0) & lw_mask,
                                            structure=morphology.disk(2))
-        print(f"satin outlines: {len(outline_items)} segments from {_rgb_str(palette.centroids[lw])}")
+        _extra = f" + {len(runs)} thin running lines" if runs else ""
+        print(f"satin outlines: {len(outline_items) - len(runs)} segments{_extra} from {_rgb_str(palette.centroids[lw])}")
     return outline_items, lw_cover
 
 
@@ -1360,6 +1398,38 @@ def nn_sort(items, needle):
     return out
 
 
+def nn_sort_ends(items, needle):
+    """Nearest-neighbour order of path items by ENDPOINT, reversing a path when its far end is nearer.
+
+    Outline segments meet at junctions, so the next segment usually starts where the
+    previous one ended: no jump, no trim. Each item gets ``ends`` = (start, end) in
+    path order, which plan_trims uses as the exact jump instead of its geometric guess.
+    """
+    remaining = list(items)
+    out = []
+    cur = np.asarray(needle, dtype=float)
+    while remaining:
+        best = None
+        for k, o in enumerate(remaining):
+            pts = np.asarray(o["pts"], dtype=float)
+            da = float(np.hypot(*(pts[0] - cur)))
+            db = float(np.hypot(*(pts[-1] - cur)))
+            cand = (da, k, False) if da <= db else (db, k, True)
+            if best is None or cand[0] < best[0]:
+                best = cand
+        _, k, rev = best
+        o = remaining.pop(k)
+        pts = np.asarray(o["pts"], dtype=float)
+        if rev:
+            pts = pts[::-1]
+            o["pts"] = pts
+            o["d"] = "M " + " L ".join(f"{x:.1f},{y:.1f}" for y, x in pts)
+        o["ends"] = (pts[0], pts[-1])
+        out.append(o)
+        cur = pts[-1]
+    return out
+
+
 def order_objects(img, scale, palette, fill_colors, color_items, color_keep_lab,
                   satinized_satins, outline_items, border, settings):
     """Global needle-aware ordering; builds stitch_index for the trim test."""
@@ -1405,7 +1475,8 @@ def order_objects(img, scale, palette, fill_colors, color_items, color_keep_lab,
     if outline_items:
         satin_img = Image.new("I", (W, H), -1)
         satin_draw = ImageDraw.Draw(satin_img)
-        for o in nn_sort(outline_items, needle):
+        _outline_sort = nn_sort_ends if settings.outline_order == "endpoint" else nn_sort
+        for o in _outline_sort(outline_items, needle):
             o["group_id"] = "outlines"
             o["group_label"] = "Outline"
             o["index"] = len(objs)
@@ -1505,6 +1576,10 @@ def plan_trims(img, scale, objs, stitch_index, settings):
     if settings.trim:
         for i in range(len(objs) - 1):
             d_min, d_max, p0, p1 = gap_and_segment(objs[i], objs[i + 1], scale.px_per_mm)
+            _ea, _eb = objs[i].get("ends"), objs[i + 1].get("ends")
+            if (_ea is not None and _eb is not None
+                    and float(np.hypot(*(_ea[1] - _eb[0]))) / scale.px_per_mm <= settings.trim_min_mm):
+                continue        # the next path starts where this one ended: no jump to cut
             if settings.trim_threshold_mm == 0:
                 short = d_min <= settings.trim_min_mm
             else:
