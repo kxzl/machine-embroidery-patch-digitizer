@@ -36,6 +36,18 @@ For every picture the pipeline writes:
 - **Trims.** A long or exposed jump gets a trim. Jumps under 2 mm are left alone.
 - **Layered SVG input.** An Inkscape SVG with named layers goes through a separate path that keeps the artist's stitch order.
 
+## Sewn results
+
+Photos by the author, on black wool, sewn on a Husqvarna/Viking machine.
+
+![Book Burner sewn on black wool](docs/assets/sewn-book-burner.jpg)
+
+*Book Burner. Red, gold, white, copper and black threads on a black border. A clean sew.*
+
+![Scavenger's Daughter in the 260 x 200 mm Viking hoop](docs/assets/sewn-scavengers-daughter.jpg)
+
+*Scavenger's Daughter in the 260 x 200 mm hoop. The satin on the centipede came out very well. Known problems in this sew: some centipede legs are missing, dense areas jammed the machine, and the white shading on the centipede did not need to be stitched.*
+
 ## Gallery
 
 The source images are AI-generated with Google Gemini. Each sheet shows the source, the stitch plan and the coverage render. Numbers come from the VP3 files; the exact command for every image is in [docs/assets/render-manifest.md](docs/assets/render-manifest.md).
