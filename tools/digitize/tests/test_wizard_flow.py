@@ -287,6 +287,33 @@ class ImageCheck(unittest.TestCase):
         self.assertFalse(r.ok)
         self.assertIn("cannot read", r.error)
 
+    def test_transparent_artwork_touching_one_edge(self):
+        from tools.digitize.wizard.imagecheck import inspect
+        im = Image.new("RGBA", (400, 400), (0, 0, 0, 0))
+        ImageDraw.Draw(im).rectangle((0, 100, 199, 299), fill=(200, 30, 30, 255))
+        r = inspect(self.save(im, "edge.png"))
+        self.assertEqual((r.design_x, r.design_y), (0, 100))
+        self.assertTrue(core.artwork_touches_edge(r))
+        self.assertTrue(any("touches the edge" in a for a in core.image_advice(r)))
+
+    def test_transparent_artwork_with_a_margin(self):
+        from tools.digitize.wizard.imagecheck import inspect
+        im = Image.new("RGBA", (400, 400), (0, 0, 0, 0))
+        ImageDraw.Draw(im).ellipse((100, 100, 299, 299), fill=(200, 30, 30, 255))
+        r = inspect(self.save(im, "margin.png"))
+        self.assertGreaterEqual(r.design_x, 90)
+        self.assertFalse(core.artwork_touches_edge(r))
+        self.assertFalse(any("touches the edge" in a for a in core.image_advice(r)))
+
+    def test_opaque_plain_background_with_a_margin(self):
+        from tools.digitize.wizard.imagecheck import inspect
+        im = Image.new("RGB", (400, 400), (254, 255, 254))
+        ImageDraw.Draw(im).ellipse((100, 100, 299, 299), fill=(200, 30, 30))
+        r = inspect(self.save(im, "plain_margin.png"))
+        self.assertEqual(r.kind, "plain_background")
+        self.assertFalse(core.artwork_touches_edge(r))
+        self.assertFalse(any("touches the edge" in a for a in core.image_advice(r)))
+
     def test_wizard_rejects_unreadable_then_accepts(self):
         from tools.digitize.wizard.imagecheck import inspect
         bad = self.tmp / "notes.png"

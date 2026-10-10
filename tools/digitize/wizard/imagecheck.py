@@ -34,8 +34,9 @@ def inspect(path: Path) -> ImageReport:
 
     transparent = arr[..., 3] < ALPHA_CUT
     if transparent.any():
-        dw, dh = _alpha_bounds(transparent, w, h)
-        return ImageReport(width=w, height=h, design_w=dw, design_h=dh, kind="transparent")
+        dx, dy, dw, dh = _alpha_bounds(transparent, w, h)
+        return ImageReport(width=w, height=h, design_w=dw, design_h=dh,
+                           design_x=dx, design_y=dy, kind="transparent")
 
     rgb = arr[..., :3].astype(float)
     p = CORNER
@@ -46,8 +47,10 @@ def inspect(path: Path) -> ImageReport:
     fg = dist > BG_T1
     if fg.any():
         ys, xs = np.where(fg)
+        dx, dy = int(xs.min()), int(ys.min())
         dw, dh = int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1)
     else:
+        dx = dy = 0
         dw, dh = w, h
     block = [np.median(b.reshape(-1, 3), axis=0) for b in
              (rgb[:p, :p], rgb[:p, -p:], rgb[-p:, :p], rgb[-p:, -p:])]
@@ -55,6 +58,7 @@ def inspect(path: Path) -> ImageReport:
     frame = np.concatenate([dist[:2].ravel(), dist[-2:].ravel(), dist[:, :2].ravel(), dist[:, -2:].ravel()])
     plain = corners_agree and float((frame <= BG_T1).mean()) >= FRAME_SHARE
     return ImageReport(width=w, height=h, design_w=dw, design_h=dh,
+                       design_x=dx, design_y=dy,
                        kind="plain_background" if plain else "busy_background",
                        background_hex="#%02x%02x%02x" % tuple(int(round(v)) for v in bg) if plain else "")
 
@@ -76,5 +80,5 @@ def _alpha_bounds(transparent, w: int, h: int):
         pass
     ys, xs = np.where(opaque)
     if not len(xs):
-        return w, h
-    return int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1)
+        return 0, 0, w, h
+    return int(xs.min()), int(ys.min()), int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1)

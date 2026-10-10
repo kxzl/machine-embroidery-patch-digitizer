@@ -60,6 +60,12 @@ measures the VP3 itself. If it is over the hoop area it runs once more with a sm
 is still over, the summary says **TOO BIG FOR THE HOOP**, the exit code is 1, and you should not sew
 the file. It also warns when the design ends within 2 mm of the hoop area edge.
 
+The results list every warning in plain words. Many lines too narrow for a satin stitch are grouped
+into one line that gives the count and the narrowest width. If the program left out very short pieces
+of the outline, one line says how many. And when the artwork touches the edge of the picture, it says
+that the satin border is then stitched about 2.5 mm outside the size you chose, so the patch comes out
+bigger than asked: leave a little empty space around the artwork for an exact size.
+
 Files go to `output/<name>/`, where `<name>` is the picture's file name with unusual characters
 replaced by `-` (`Scavenger's Daughter.png` becomes `Scavenger-s-Daughter`). If that folder exists,
 the wizard asks: keep both (the new one gets `-2`, `-3`), replace, or cancel. Nothing is replaced

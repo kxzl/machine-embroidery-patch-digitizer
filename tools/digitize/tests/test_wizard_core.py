@@ -201,6 +201,81 @@ class Advice(unittest.TestCase):
         self.assertEqual(core.rotation_advice(wide, (260.0, 200.0), None), [])
         self.assertEqual(core.rotation_advice(tall, (260.0, 200.0), 100.0), [])   # 100 mm fits already
 
+    def test_edge_advice_when_artwork_touches_the_picture_edge(self):
+        # artwork flush with the left edge, margins elsewhere
+        rep = ImageReport(width=800, height=600, design_w=500, design_h=400, design_x=0, design_y=100)
+        adv = core.image_advice(rep)
+        self.assertTrue(any("touches the edge" in a for a in adv))
+        line = [a for a in adv if "touches the edge" in a][0]
+        self.assertIn("%s mm" % core.fmt_mm(core.SATIN_BORDER_MM), line)
+        self.assertTrue(core.artwork_touches_edge(rep))
+        # one pixel from the edge still counts
+        near = ImageReport(width=800, height=600, design_w=500, design_h=400, design_x=1, design_y=100)
+        self.assertTrue(core.artwork_touches_edge(near))
+
+    def test_no_edge_advice_with_a_margin(self):
+        rep = ImageReport(width=800, height=600, design_w=500, design_h=400, design_x=100, design_y=100)
+        self.assertFalse(core.artwork_touches_edge(rep))
+        self.assertFalse(any("touches the edge" in a for a in core.image_advice(rep)))
+
+    def test_no_edge_advice_when_bounds_position_was_not_measured(self):
+        rep = ImageReport(width=800, height=600, design_w=800, design_h=600)
+        self.assertFalse(core.artwork_touches_edge(rep))
+        self.assertFalse(any("touches the edge" in a for a in core.image_advice(rep)))
+
+
+class PipelineWarnings(unittest.TestCase):
+    SATIN = ("warning: satin %s is %s mm wide, below Ink/Stitch's 1.0 mm gate "
+             "-- it will stitch as running stitch")
+
+    def test_satin_warnings_collapse_to_one_line(self):
+        lines = ["== digitizing x",
+                 self.SATIN % ("sat-1", "0.80"),
+                 self.SATIN % ("sat-2", "0.62"),
+                 self.SATIN % ("s_3", "0.95"),
+                 "warning: source is too coarse"]
+        out = core._pipeline_warnings(lines)
+        satin = [w for w in out if "thin line" in w]
+        self.assertEqual(len(satin), 1)
+        self.assertIn("3 thin lines", satin[0])
+        self.assertIn("the 1.0 mm", satin[0])
+        self.assertIn("the narrowest is 0.62 mm", satin[0])
+        self.assertIn("Source is too coarse", out)          # other warnings kept
+        self.assertNotIn("warning: satin", "\n".join(out))  # the raw lines are gone
+
+    def test_satin_warnings_dedupe_across_passes(self):
+        line = self.SATIN % ("sat-1", "0.80")
+        out = core._pipeline_warnings([line, line])
+        self.assertEqual(len(out), 1)
+        self.assertIn("1 thin line is narrower", out[0])
+        self.assertIn("it is 0.80 mm", out[0])
+
+    def test_dropped_outline_note_becomes_one_plain_line(self):
+        note = "note: dropped 3 outline satin(s) shorter than their own width (5 -> 2)"
+        out = core._pipeline_warnings([note, "note: pinned colour(s) with no pixels dropped: #000000"])
+        self.assertEqual(out, ["3 very short pieces of outline were left out because they were "
+                               "shorter than they are wide."])
+
+    def test_dropped_outline_note_dedupes_across_passes(self):
+        note = "note: dropped 2 outline satin(s) shorter than their own width (4 -> 2)"
+        out = core._pipeline_warnings([note, note])
+        self.assertEqual(len(out), 1)
+        self.assertIn("2 very short pieces of outline", out[0])
+
+    def test_satin_and_dropped_keep_their_place_between_other_warnings(self):
+        lines = ["warning: first",
+                 self.SATIN % ("a", "0.70"),
+                 "warning: middle",
+                 "note: dropped 1 outline satin(s) shorter than their own width (3 -> 2)",
+                 "warning: last"]
+        out = core._pipeline_warnings(lines)
+        self.assertEqual(len(out), 5)
+        self.assertIn("First", out[0])
+        self.assertIn("thin line", out[1])
+        self.assertIn("Middle", out[2])
+        self.assertIn("very short pieces", out[3])
+        self.assertIn("Last", out[4])
+
 
 class PickName(unittest.TestCase):
     def test_numbering_and_overwrite(self):

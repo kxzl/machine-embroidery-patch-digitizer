@@ -32,6 +32,8 @@ DEFAULT_SIZE_MM = 100.0            # Patch size: longest side
 WARN_EDGE_MM = 2.0                 # warn when the design ends this close to the Fit box edge
 MIN_PX_PER_MM = 3.0                # the pipeline's own resolution warning
 CUSTOM_HOOP_MIN, CUSTOM_HOOP_MAX = 20.0, 400.0   # proposed bounds, confirm at pause 2
+SATIN_BORDER_MM = 2.5              # pipeline default border is 2.5 mm (vectorize.py border-mm)
+EDGE_TOUCH_PX = 1                  # artwork this close to the picture edge counts as touching it
 
 # ---- values from the task brief, not from the design table ----------------------
 COLORS_AUTO, COLORS_FEWER, COLORS_MORE = 6, 4, 8
@@ -57,6 +59,8 @@ class ImageReport:
     height: int = 0
     design_w: int = 0              # the artwork's own bounds, pixels (what the pipeline scales)
     design_h: int = 0
+    design_x: int = -1             # top-left of the artwork bounds, pixels (-1 = not measured)
+    design_y: int = -1
     kind: str = "transparent"      # transparent | plain_background | busy_background
     background_hex: str = ""       # plain background colour, e.g. "#fefffe"
 
@@ -201,6 +205,19 @@ def fill_size_mm(report: ImageReport, hoop: Tuple[float, float]) -> float:
     return max(report.design_w, report.design_h) / ppm
 
 
+def artwork_touches_edge(report: ImageReport) -> bool:
+    """True when the artwork bounds reach the picture edge (within EDGE_TOUCH_PX on any side)."""
+    if not report.width or not report.height or not report.design_w or not report.design_h:
+        return False
+    if report.design_x < 0 or report.design_y < 0:      # bounds position was not measured
+        return False
+    margins = (report.design_x,
+               report.design_y,
+               report.width - (report.design_x + report.design_w),
+               report.height - (report.design_y + report.design_h))
+    return min(margins) <= EDGE_TOUCH_PX
+
+
 def image_advice(report: ImageReport) -> List[str]:
     """Advice that needs only the picture. Never blocks."""
     out = []
@@ -216,6 +233,12 @@ def image_advice(report: ImageReport) -> List[str]:
         out.append("The background is not transparent and not one plain colour. "
                    "The whole picture, background included, will be stitched. "
                    "A picture with a transparent background (png) works much better.")
+    if artwork_touches_edge(report):
+        out.append("The artwork touches the edge of the picture. "
+                   "The satin border is then stitched about %s mm outside the size you chose, "
+                   "so the patch comes out bigger than asked. Leave a little empty space around "
+                   "the artwork (a few percent of the width on every side) for an exact size."
+                   % fmt_mm(SATIN_BORDER_MM))
     return out
 
 
@@ -442,15 +465,74 @@ def publish(stage: Path, out_root: Path, slug: str, policy: str,
 # ---- summary text -------------------------------------------------------------------------------
 
 
+# vectorize.py: "warning: satin <id> is <w> mm wide, below Ink/Stitch's <gate> mm gate -- ..."
+_SATIN_WARNING_RE = re.compile(
+    r"\s*warning:\s*satin\s+[A-Za-z0-9_-]+\s+is\s+([0-9]+(?:\.[0-9]+)?)\s*mm wide,\s*"
+    r"below Ink/Stitch's\s+([0-9]+(?:\.[0-9]+)?)\s*mm gate", re.I)
+# vectorize.py: "note: dropped N outline satin(s) shorter than their own width (A -> B)"
+_DROPPED_NOTE_RE = re.compile(r"\s*note:\s*dropped\s+(\d+)\s+outline satin", re.I)
+
+
+def _satin_summary(count: int, narrowest: float, gate: str) -> str:
+    """One plain line for all the narrow-satin warnings."""
+    if count == 1:
+        return ("1 thin line is narrower than the %s mm the machine needs for a satin stitch "
+                "(it is %.2f mm). It will sew as a thin running stitch. "
+                "A bigger patch or a bolder picture gives a better result." % (gate, narrowest))
+    return ("%d thin lines are narrower than the %s mm the machine needs for a satin stitch "
+            "(the narrowest is %.2f mm). They will sew as a thin running stitch. "
+            "A bigger patch or a bolder picture gives a better result." % (count, gate, narrowest))
+
+
 def _pipeline_warnings(lines: Sequence[str]) -> List[str]:
-    out = []
+    """Plain warnings for the summary.
+
+    Every `warning:` line is copied, first letter capitalised, exact duplicates dropped. The
+    per-satin gate warnings (one per narrow satin) are collapsed into a single line with the
+    count and the narrowest width, and the dropped-outline note becomes one plain sentence, so
+    a beginner does not see a flood of near-identical lines.
+    """
+    out: List[str] = []
+    seen = set()
+    satin_widths: List[float] = []
+    satin_gate = ""
+    satin_at: Optional[int] = None
+    dropped_total = 0
+    dropped_at: Optional[int] = None
     for ln in lines:
+        sm = _SATIN_WARNING_RE.match(ln)
+        if sm:
+            key = re.sub(r"\s+", " ", ln.strip().lower())
+            if key not in seen:                       # exact duplicates across passes count once
+                seen.add(key)
+                satin_widths.append(float(sm.group(1)))
+                satin_gate = satin_gate or sm.group(2)
+            if satin_at is None:
+                satin_at = len(out)
+            continue
+        dm = _DROPPED_NOTE_RE.match(ln)
+        if dm:
+            key = re.sub(r"\s+", " ", ln.strip().lower())
+            if key not in seen:                       # exact duplicates across passes count once
+                seen.add(key)
+                dropped_total += int(dm.group(1))
+            if dropped_at is None:
+                dropped_at = len(out)
+            continue
         m = re.match(r"\s*warning:\s*(.+)", ln, re.I)
         if m:
             text = m.group(1).strip()
             text = text[:1].upper() + text[1:]
             if text not in out:
                 out.append(text)
+    inserts: List[Tuple[int, str]] = []
+    if satin_at is not None:
+        inserts.append((satin_at, _satin_summary(len(satin_widths), min(satin_widths), satin_gate)))
+    if dropped_at is not None:
+        inserts.append((dropped_at, "%d very short pieces of outline were left out because they were "
+                                    "shorter than they are wide." % dropped_total))
+    for idx, text in sorted(inserts, key=lambda t: t[0], reverse=True):
+        out.insert(idx, text)
     return out
 
 
