@@ -38,7 +38,57 @@ Status: CONFIRMED by the operator on 2026-10-10. Progress:
   Thickening the keylines first made it worse. `output_vp3/skyfowl_web_2.vp3`
   (28,326 stitches) keeps readable feather scallops but the talons and fletching are
   still black masses. Flame is banded (no gradient emit yet).
-- G4, G5: not started. 2 web generations logged in `input/nano_banana/web_log.md`.
+- Peace (web 2026-10-10): image 2752 x 1536 (16:9, NOT square: the web UI does not
+  enforce the aspect ratio, add "square 1:1 image" to prompts; the pipeline works
+  from the artwork bounding box so it does not matter for stitching). Light strokes
+  median 4.7 mm, 3 percent of length under 1.2 mm: detail limit honoured (bold subject).
+  Pipeline at 60 mm, 3 pinned threads: `output_vp3/peace_web_1.vp3`, 9,034 stitches,
+  reads well (stencil bridges, grey ghost shadow kept).
+- Peace v2 (operator chose the "middle" version, web 2026-10-10): 2048 x 2048, perfect
+  disc (edge radius variation 0.09 percent), exact symbol, 5 chips (asked for 2 or 3),
+  grey slip shadow, no watermark. Pipeline: `output_vp3/peace_web_2.vp3`, 9,802
+  stitches, 69 trims, packing 69 points (OK). BUG FOUND on the way: `key_background.py`
+  keys by colour distance from the background, so the off-white symbol (about 33
+  from the white margin) came out 99 percent semi-transparent (19.84 percent
+  feathered), giving 23,139 stitches, 364 points per 1.5 mm and 171 mm of thread in a
+  1 mm cell. Fix: new opt-in `--keep-enclosed` (only background connected to the image
+  edge becomes transparent), passed through by `run.sh`; default unchanged and
+  byte-identical on the 3 `regress.sh` designs; with the flag Book Burner and Goat
+  change (pale interiors stay opaque), so the default stays off until the operator
+  rebaselines. 4 tests, mutation-checked. Use `--keep-enclosed` for any prompt with
+  off-white or cream parts near the margin colour.
+- Bomb (web 2026-10-10): 2048 x 2048, a real pixel grid (cells about 51 px, about 2.6
+  mm at 90 mm). Misses: no iron band or rivets (drew a diagonal seam), more greys than
+  the six asked for, and "white field" is indistinguishable from the white margin so
+  background keying removes it (die-cut sprite, no square patch). Pipeline: with the
+  default border the 2.5 mm black satin border swallows the one-cell fuse; use
+  `--no-border --no-satin-outlines` (config `patch_descriptions/bomb_web.yaml`):
+  `output_vp3/bomb_web_1_noborder.vp3`, 13,304 stitches, fuse and spark intact.
+  A finishing edge is then the sprite's own black outline, not a satin border.
+- Jam check (Haiku subagent, branch `feat/jam-check` 839532a on top of gradient-fill,
+  10 tests): `tools/digitize/qa/jam_check.py` checks needle packing, thread per 1 mm
+  cell and trim clusters, and run.sh prints it. Finding: detailed designs have about 470
+  trims and clusters of 25 to 28 cuts within 6 mm (Skyfowl at 120 mm), flat and
+  gradient versions alike, so gradients are not the cause. `--trim-mm 8` gives 318
+  trims (cluster 14), `--trim-mm 12` gives 288 (cluster 12), with a longer exposed
+  jump as the price. Thread per cell exceeds 20 mm on 6 of 9 reference VP3s, so that
+  threshold flags most designs and is uncalibrated.
+- Thin-line fix, outline order, minimum jump: DONE 2026-10-10 and landed on
+  `review-round-1` (merges aad46c2 and cefb58f, local, nothing pushed), all opt-in
+  YAML keys, default output byte-identical. The sandbox classifier refused an
+  autonomous DeepSeek agent the first time; a retry later launched (the operator said
+  it is not blocked), and DeepSeek wrote the USAGE.md section. Operator reported the
+  Skyfowl black overlap broke thread and needles and the machine stopped constantly.
+  Measured causes: 329 trims in the black block alone (one per outline satin, plus
+  exposed jumps in the last layer), lock stitches near trims (about 28 percent of the
+  dense points), and hairline outlines widened to 1.2 mm satins that pile up at
+  junctions (up to 5 layers at one spot). Result on Skyfowl image 2 at 120 mm
+  (`output_vp3/skyfowl_web_2_120_safe.vp3`, config `patch_descriptions/skyfowl_safe.yaml`
+  plus `outline_order: endpoint` and `trim.min_mm: 3`): trims 469 to 188, worst trim
+  cluster 28 to 7 cuts, peak needle packing 157 to 122 points (inside the 140 limit),
+  colour changes 13 to 10 with all flame regions as gradients. Thread per cell peaks
+  at 21.5 mm (limit 20), still borderline. NOT sewn yet.
+- G4, G5: not started. 5 web generations logged in `input/nano_banana/web_log.md`.
 
 Implementation, subagents and later sessions work from this file, not from memory of
 the interview.
