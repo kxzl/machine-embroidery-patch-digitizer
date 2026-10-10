@@ -1,6 +1,6 @@
-"""Guided wizard. Stub: another change replaces it. Keep the signature of main."""
+"""Guided wizard for people who do not use the command line. Entry: digitize.py -> main(argv)."""
 
 
 def main(argv):
-    print("The guided wizard is not built yet.")
-    return 0
+    from .app import main as _main
+    return _main(argv)
