@@ -1,117 +1,160 @@
 # Digitize Patches
 
-**Turn a raster image into a pre-digitized [Ink/Stitch](https://inkstitch.org) SVG and a machine-ready VP3 embroidery file — fully headless, no Inkscape GUI required.**
+**Turn a picture into a machine embroidery file.** The pipeline separates the colours, builds fills and satin outlines, and writes an editable [Ink/Stitch](https://inkstitch.org) SVG and a VP3 file for Husqvarna and Viking machines. It runs headless: no Inkscape window is needed.
 
-![Pipeline: raster image to editable SVG to VP3](docs/assets/hero-scavenger.png)
+![Scavenger's Daughter patch: artwork, Ink/Stitch SVG render and VP3 stitch plan](docs/assets/hero-scavenger-inverted.png)
 
-*Left to right: source raster → rendered Ink/Stitch SVG (fills + satin linework) → VP3 stitch plan. Same design, end to end.*
+*Scavenger's Daughter, two threads, 259.8 x 168.6 mm, 54,233 stitches. Left to right: the artwork (black ink is the bare fabric), the Ink/Stitch SVG, the VP3 stitch plan. The artwork is by [@thedustydruid](CREDITS.md).*
 
----
-
-## Features
-
-- **Outlines become real satin.** The darkest colour's thin regions are skeletonized and emitted as Ink/Stitch satin columns whose width follows the local line thickness; solid areas stay fills.
-- **Travel-aware stitch order.** Layer order is fixed (light → dark) and not optimised; the needle position is carried across layers so each layer's nearest-neighbour sweep starts where the previous one ended. Measured ~6% less inter-object travel on the Bomb sample (2175 mm vs 2308 mm).
-- **Smart trimming** *(on by default)*. Cuts a jump when it is long (> 4 mm) **or** exposed (not covered by a later-stitched layer); jumps under 2 mm are skipped.
-- **Safe density.** Default 0.4 mm fill spacing, with a warning outside the 0.3–0.6 mm safe band (needle-break vs. unfilled).
-- **Patch border.** Satin border auto-detected/added; fills ordered light → dark; holes preserved; per-image YAML config (`order`, `skip_colors`, `density`, `border`, `trim`).
-- **Deterministic and headless.** Reproducible output via a small `wx` stub + the Ink/Stitch CLI.
-
----
-
-## Pipeline
-
-```mermaid
-flowchart LR
-    A[Raster image<br/>WebP · PNG · JPG] --> B[Colour separation<br/>Lab palette · pinned / auto]
-    B --> C{Vectorize}
-    C -->|fills| D[Closed fill regions<br/>holes preserved]
-    C -->|thin dark linework| E[Skeletonize into satin columns<br/>width follows line thickness]
-    D --> F[Travel-aware ordering + trim<br/>Ink/Stitch SVG]
-    E --> F
-    F --> G[Ink/Stitch headless CLI]
-    G --> H[VP3<br/>Husqvarna / Viking]
-```
-
----
-
-## Preview
-
-![Skyfowl before and after: source, colour separation, and VP3 stitch plan](docs/assets/skyfowl-before-after.png)
-
-*Skyfowl patch: source `.webp` → colour-separated flat art → VP3 stitch plan. The satin border and outlines are generated automatically.*
-
-<p align="center">
-  <img src="docs/assets/pipeline-stages.png" alt="Pipeline stages: raster input, k-means separation, vectorize plus satin, VP3 stitch plan" width="720">
+<p>
+  <img src="https://img.shields.io/badge/output-SVG%20%2B%20VP3-8957e5?style=flat-square" alt="Output: SVG and VP3">
+  <img src="https://img.shields.io/badge/machine-Husqvarna%20%2F%20Viking-2ea44f?style=flat-square" alt="Husqvarna / Viking">
+  <img src="https://img.shields.io/badge/python-3.13-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.13">
+  <img src="https://img.shields.io/badge/built%20on-Ink%2FStitch-f59e0b?style=flat-square" alt="Built on Ink/Stitch">
 </p>
 
-*Sample patch artwork © its respective artists — see [CREDITS.md](CREDITS.md).*
-
 ---
+
+## What you get
+
+For every picture the pipeline writes:
+
+| File | What it is |
+|---|---|
+| `output_inkstitch_svg/<name>.svg` | The digitized design. Open it in Inkscape to look at it or change it. |
+| `output_vp3/<name>.vp3` | The machine file. |
+| `output_vp3/<name>_stitchplan.png` | Every stitch drawn as a thin line, in thread colour. Check the layout without sewing. |
+| `output_vp3/<name>_coverage.png` | The same file drawn at real thread width, to judge how well the fabric is covered. |
+
+## What it does
+
+- **Colour separation.** Your picture becomes a few flat thread colours. Pin the exact hex values you own, or let the pipeline pick a palette in CIELAB.
+- **Fills with holes.** Each colour becomes closed fill regions. Holes stay open. Specks under a minimum size are dropped.
+- **Satin outlines.** Thin runs of the darkest colour are skeletonized into satin columns whose width follows the line. Anything thinner than Ink/Stitch's 1.0 mm satin minimum is widened or dropped, so it is not silently sewn as a running stitch.
+- **Satin border.** A transparent background is treated as a patch. The pipeline finds or adds a satin border and draws it last.
+- **Seam compensation.** Fills grow 0.6 mm under the layers stitched after them, so a small shift in the fabric does not open a gap. A fabric profile (`--profile vadmel`) sets density, underlay and pull compensation for thick wool.
+- **Trims.** A long or exposed jump gets a trim. Jumps under 2 mm are left alone.
+- **Layered SVG input.** An Inkscape SVG with named layers goes through a separate path that keeps the artist's stitch order.
+
+## Sewn results
+
+Photos by the author, on black wool, sewn on a Husqvarna/Viking machine.
+
+![Book Burner sewn on black wool](docs/assets/sewn-book-burner.jpg)
+
+*Book Burner. Red, gold, white, copper and black threads on a black border. A clean sew.*
+
+![Scavenger's Daughter in the 260 x 200 mm Viking hoop](docs/assets/sewn-scavengers-daughter.jpg)
+
+*Scavenger's Daughter in the 260 x 200 mm hoop. The satin on the centipede came out very well. Known problems in this sew: some centipede legs are missing, dense areas jammed the machine, and the white shading on the centipede did not need to be stitched.*
+
+## Gallery
+
+The source images are AI-generated with Google Gemini. Each sheet shows the source, the stitch plan and the coverage render. Numbers come from the VP3 files; the exact command for every image is in [docs/assets/render-manifest.md](docs/assets/render-manifest.md).
+
+![Bomb](docs/assets/gallery-bomb.png)
+
+*Bomb: 90.6 x 90.3 mm, 21,864 stitches, 6 threads.*
+
+![Skyfowl](docs/assets/gallery-skyfowl.png)
+
+*Skyfowl: 69.5 x 75.8 mm, 17,065 stitches, 5 threads.*
+
+![Midnight Epicure](docs/assets/gallery-midnight-epicure.png)
+
+*Midnight Epicure: 80.4 x 80.3 mm, 16,309 stitches, 6 threads.*
+
+<details>
+<summary>Four more designs</summary>
+
+![Four-Leaf Clover](docs/assets/gallery-four-leaf-clover.png)
+
+*Four-Leaf Clover: 75.7 x 73.3 mm, 17,503 stitches, 6 threads.*
+
+![Reaper Spider](docs/assets/gallery-reaper-spider.png)
+
+*Reaper Spider: 70.3 x 65.5 mm, 12,509 stitches, 5 threads.*
+
+![Peace](docs/assets/gallery-peace.png)
+
+*Peace: 60.8 x 61.4 mm, 7,248 stitches, 1 thread.*
+
+![Back Nine Skulls](docs/assets/gallery-back-nine-skulls.png)
+
+*Back Nine Skulls: 190.5 x 181.3 mm, 61,308 stitches, 4 threads. The source panel is the background-keyed image; no original file exists.*
+
+</details>
 
 ## Quick start
 
 ```bash
-# image → Ink/Stitch SVG + VP3
-tools/digitize/run.sh path/to/image.webp
+# picture to Ink/Stitch SVG and VP3
+tools/digitize/run.sh path/to/image.png
 
-# more colours, tighter fill density
-tools/digitize/run.sh --density 0.35 --colors 8 img.jpg
+# a patch with a plain background: key it out first, 90 mm wide, 6 colours
+tools/digitize/run.sh --key-background --size-mm 90 --colors 6 image.png
 
-# keep outlines as fills, disable trimming
-tools/digitize/run.sh --no-trim --no-satin-outlines img.webp
+# pin your own threads
+tools/digitize/run.sh --palette "#1A1A1A,#B5651D,#F2ECD7" image.png
 ```
 
-Output lands in `work/`: `<name>.svg` (editable, opens in Inkscape) and `<name>.vp3` (machine file).
-
----
+`run.sh` takes WebP, PNG and JPG pictures, and layered Inkscape SVG files. Every flag, the YAML config format and the fabric profiles are in [docs/USAGE.md](docs/USAGE.md). Setup needs Python 3.13, the pinned packages and a checkout of Ink/Stitch; the steps are in the same document.
 
 ## How it works
 
-1. **Classify** — transparent backgrounds are treated as patches (alpha silhouette + detected satin border); opaque art drops the lightest cluster as "paper" and routes the darkest to outlines.
-2. **Denoise + palette** — median filter, then flat thread colours: pinned `palette:` hexes assigned in Lab, or an automatic Lab palette (S3; `--palette-mode kmeans` for the legacy RGB k-means), bounded by `--colors`.
-3. **Vectorize** — each colour becomes closed `fill` regions with holes preserved (`fill-rule="evenodd"`); sub-mm specks are dropped.
-4. **Outlines → satin** — thin runs of the outline colour are skeletonized into centre lines and emitted as satin columns that widen to match the local stroke.
-5. **Order + trim** — layers keep their light → dark order; within a layer, components are swept nearest-neighbour from the carried needle position, then long or exposed jumps are cut.
-6. **Export** — the SVG is written with per-object Ink/Stitch parameters (`row_spacing_mm`, `trim_after`, `satin_column`) and converted to VP3 headlessly.
+```mermaid
+flowchart LR
+    A[Picture<br/>WebP, PNG, JPG] --> B[Colour separation<br/>pinned or automatic palette]
+    B --> C{Vectorize}
+    C -->|colour regions| D[Fills<br/>holes kept]
+    C -->|thin dark lines| E[Satin columns<br/>width follows the line]
+    D --> F[Order, underlap, trims<br/>Ink/Stitch SVG]
+    E --> F
+    F --> G[Ink/Stitch headless export]
+    G --> H[VP3 file and stitch plans]
+```
 
----
+1. **Classify.** A transparent background marks a patch (alpha silhouette plus border). An opaque picture drops its lightest cluster as paper and sends the darkest colour to the outlines.
+2. **Denoise and palette.** A median filter, then flat thread colours: your pinned hexes assigned in CIELAB, or an automatic palette bounded by `--colors`.
+3. **Vectorize.** Each colour becomes closed fill regions with `evenodd` holes.
+4. **Outlines to satin.** Thin runs of the outline colour are skeletonized into centre lines and emitted as satin columns.
+5. **Order and trim.** Layers keep their light-to-dark order. Inside a layer the objects are swept nearest-first from the needle position left by the previous layer. Long or exposed jumps get trims.
+6. **Export.** The SVG carries the Ink/Stitch parameters for each object and is converted to VP3 headlessly, using a small `wx` stand-in so no GUI toolkit is needed.
 
-## Repo layout
+## Status and limits
+
+- Developed and tested on Linux with Python 3.13. macOS and Windows are untested.
+- VP3 is the only machine format that is checked end to end.
+- The author sews the results on a Husqvarna/Viking machine on black vadmel wool. The `vadmel` profile is a starting point: some of its numbers are extrapolated from research, so calibrate them on your own fabric with `tools/digitize/swatch.py`.
+- Output quality depends on the source. The pipeline warns when a source has fewer than 3 pixels per millimetre at the chosen size.
+- Fill spacing outside 0.3 to 0.6 mm triggers a warning (below that the needle can break, above it the fabric shows).
+
+## Repository layout
 
 ```
 tools/
-├── digitize/
-│   ├── run.sh          # one-shot CLI: image → SVG + VP3
-│   ├── vectorize.py    # separation, vectorize, satin outlines, ordering, trim
-│   ├── skeleton.py     # centre-line extraction for satin outlines
-│   ├── preview.py      # render a VP3 to a colour stitch-plan PNG
-│   ├── analyze.py      # colour/region statistics for debugging separation
-│   └── make_config.*   # per-image YAML config helper
-└── wxstub/             # minimal wx shim so Ink/Stitch runs headless
+  digitize/
+    run.sh           one command: picture or SVG to SVG and VP3, with previews
+    vectorize.py     picture path: colours, fills, satin, border, order, trims
+    svg_digitize.py  layered SVG path
+    skeleton.py      centre lines for satin outlines
+    satinize.py      turn thin shapes into satin columns
+    trim_vp3.py      add trims to long jumps in the VP3
+    preview.py       draw a VP3 as a stitch plan
+    key_background.py  turn a flat background into transparency
+    make_config.py   write a starter YAML config for a picture
+    swatch.py        make a calibration swatch for a fabric
+    invert_ink.py    one-off tool that builds the inverted Scavenger's Daughter
+    qa/              checks: fabric pull, coverage, travel, regression run
+  wxstub/            stand-in for wx so Ink/Stitch runs without a GUI
 docs/
-├── USAGE.md            # full setup, every flag and tunable constant
-└── assets/             # README previews
+  USAGE.md           setup, every flag, fabric profiles
+  EMBROIDERY_QUALITY.md   notes on stitch quality, with sources
+  assets/            README images, manifest and the script that rebuilds them
+GLOSSARY.md          the words this project uses
+CREDITS.md           artwork credits
 ```
-
----
-
-## Docs
-
-Full setup instructions (Python 3.13 venv + vendored Ink/Stitch), every command-line flag, tunable constants, and known caveats live in **[docs/USAGE.md](docs/USAGE.md)**.
-
----
 
 ## Credits
 
-Sample patch art comes from the [Dungeon Crawler Carl wiki](https://dungeon-crawler-carl.fandom.com/wiki/Category:Patches): Bomb & Book Burner by **u/waterkangaroo**, Skyfowl by **Waterkangaroo**, Scavenger's Daughter by **@thedustydruid**. Full details in **[CREDITS.md](CREDITS.md)**.
-
----
-
-<p>
-  <a href="docs/USAGE.md"><img src="https://img.shields.io/badge/docs-USAGE.md-blue?style=flat-square" alt="Docs"></a>
-  <img src="https://img.shields.io/badge/output-SVG%20%2B%20VP3-8957e5?style=flat-square" alt="Output: SVG + VP3">
-  <img src="https://img.shields.io/badge/machine-Husqvarna%20%2F%20Viking-2ea44f?style=flat-square" alt="Husqvarna / Viking">
-  <img src="https://img.shields.io/badge/python-3.13-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.13 (tested)">
-  <img src="https://img.shields.io/badge/built%20on-Ink%2FStitch-f59e0b?style=flat-square" alt="Built on Ink/Stitch">
-</p>
+The hero artwork is Scavenger's Daughter by @thedustydruid (Instagram), shown here as a derived two-colour version for demonstration. The gallery source images were generated with Google Gemini. The patch subjects are catalogued on the [Dungeon Crawler Carl wiki](https://dungeon-crawler-carl.fandom.com/wiki/Category:Patches). All artwork stays with its creators. See [CREDITS.md](CREDITS.md). Embroidery output is made by [Ink/Stitch](https://inkstitch.org).
