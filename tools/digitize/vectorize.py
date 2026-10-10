@@ -1231,15 +1231,23 @@ def outline_satins(img, scale, masks, palette, lw, settings):
     # points and dies with "tuple index out of range" in flattened_sections.
     # Polygonal simplification can shorten a run below the SATIN_MIN_LEN_MM
     # gate, so re-test on the emitted polyline.
+    # A short run that closes on itself (its ends closer than half its width)
+    # is the outline of a blob smaller than the satin is wide: the two offset
+    # rails cross and Ink/Stitch dies in the same place.
     _segs = []
+    n_loops = 0
     for d, poly, w in segs:
-        _len = float(np.hypot(*np.diff(poly, axis=0).T).sum()) / scale.px_per_mm
-        if _len < max(2.5, 1.5 * w / scale.px_per_mm):
+        _px = float(np.hypot(*np.diff(poly, axis=0).T).sum())
+        if _px / scale.px_per_mm < max(2.5, 1.5 * w / scale.px_per_mm):
+            continue
+        if _px < 10.0 * w and float(np.hypot(*(poly[0] - poly[-1]))) < 0.5 * w:
+            n_loops += 1
             continue
         _segs.append((d, poly, w))
     if len(_segs) != len(segs):
         print(f"note: dropped {len(segs) - len(_segs)} outline satin(s) shorter than "
-              f"their own width ({len(segs)} -> {len(_segs)})")
+              f"their own width or closed on themselves ({len(segs)} -> {len(_segs)}"
+              + (f", {n_loops} loop(s)" if n_loops else "") + ")")
     segs = _segs
     if segs or runs:
         cover_img = Image.new("L", (W, H), 0)
