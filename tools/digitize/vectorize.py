@@ -46,6 +46,7 @@ from scipy.spatial import cKDTree
 from shapely.geometry import Polygon
 from skimage import color, measure, morphology
 
+import gradient as gradfit
 import satinize
 from skeleton import satin_segments
 
@@ -135,6 +136,7 @@ class Settings:
     satin_underlay_inset_mm: float = 0.4
     border_zigzag_spacing_mm: float | None = None
     fabric_color: str = ""
+    gradients: list = field(default_factory=list)   # [{name, stops, min_area_mm2, min_r2, row_spacing_mm}]
     # algorithm constants (module-level defaults, overridable per class later)
     satin_min_mm: float = SATIN_MIN_MM
     satin_gate_mm: float = SATIN_GATE_MM
@@ -428,6 +430,24 @@ def build_settings(flags, cfg):
     sat_min_coverage = float(_sat_cfg.get("min_coverage", 0.9))
     sat_max_overhang = float(_sat_cfg.get("max_overhang", 0.45))
 
+    # --- gradients: regions stitched as one Ink/Stitch linear gradient fill -----
+    _gradients = []
+    _grad_cfg = cfg.get("gradients") or []
+    if not isinstance(_grad_cfg, list):
+        print(f"warning: ignoring non-list gradients {_grad_cfg!r}")
+        _grad_cfg = []
+    for _i, _g in enumerate(_grad_cfg):
+        _stops = [str(h).strip().lower() for h in ((_g or {}).get("stops") or [])] if isinstance(_g, dict) else []
+        if not 2 <= len(_stops) <= 4 or not all(re.fullmatch(r"#[0-9a-f]{6}", h) for h in _stops):
+            print(f"warning: ignoring gradient #{_i + 1}: needs 2 to 4 '#rrggbb' stops, light to dark")
+            continue
+        _gradients.append(dict(name=str(_g.get("name") or f"gradient{_i + 1}"), stops=_stops,
+                               min_area_mm2=float(_g.get("min_area_mm2", 20.0)),
+                               min_r2=float(_g.get("min_r2", 0.5)),
+                               # interleaved rows leave small gaps at 0.4 mm (measured:
+                               # 2.9 % uncovered on a flame lobe vs 0.05 % at 0.3 mm)
+                               row_spacing_mm=float(_g.get("row_spacing_mm", 0.3))))
+
     for _name, _val in [("global", row_spacing_mm)] + list(_density.items()):
         if not 0.3 <= _val <= 0.6:
             print(f"warning: density {_val} mm ({_name}) is outside the safe 0.3-0.6 mm range "
@@ -455,6 +475,7 @@ def build_settings(flags, cfg):
         fill_underlay_light_l=fill_underlay_light_l, satin_underlay=satin_underlay,
         satin_underlay_inset_mm=satin_underlay_inset_mm,
         border_zigzag_spacing_mm=border_zigzag, fabric_color=fabric_color,
+        gradients=_gradients,
     )
 
 
@@ -1194,6 +1215,55 @@ def outline_satins(img, scale, masks, palette, lw, settings):
     return outline_items, lw_cover
 
 
+def gradient_regions(img, scale, palette, masks, fill_colors, lw, settings):
+    """Find the regions to stitch as one linear gradient (config ``gradients:``).
+
+    A region is a connected component of the union of a gradient's stop colours
+    whose original pixels follow a straight colour ramp (gradient.fit_region).
+    Its pixels are removed from the flat masks so no flat fill stitches under it.
+    A region that does not fit stays flat. Returns dicts: mask, stops (palette
+    indices in offset order), fit, name.
+    """
+    out = []
+    for g in settings.gradients:
+        try:
+            stops = gradfit.resolve_stops(g["stops"], palette.centroids)
+        except ValueError as e:
+            print(f"gradient {g['name']}: skipped, {e}")
+            continue
+        if any(c not in masks or c == lw for c in stops):
+            print(f"gradient {g['name']}: skipped, a stop colour is skipped or is the outline colour")
+            continue
+        union = np.zeros_like(masks[stops[0]])
+        base = np.zeros_like(union)
+        for c in stops:
+            union |= masks[c]
+            base |= (palette.label_all == c) & img.silhouette
+        stops_lab = gradfit.rgb_to_lab(palette.centroids[stops])
+        min_px = max(1, int(g["min_area_mm2"] * scale.px_per_mm ** 2))
+        for comp in gradfit.regions(union, min_px):
+            fitpix = comp & base
+            n_fit = int(fitpix.sum())
+            share = [int(((palette.label_all == c) & fitpix).sum()) / max(1, n_fit) for c in stops]
+            area = float(comp.sum()) / scale.px_per_mm ** 2
+            if sum(1 for f in share if f >= 0.08) < 2:
+                print(f"gradient {g['name']}: region {area:.0f} mm2 stays flat (under two stop colours)")
+                continue
+            ys, xs = np.nonzero(fitpix)
+            fit = gradfit.fit_region(gradfit.rgb_to_lab(img.rgb[ys, xs]),
+                                     np.column_stack([xs, ys]), stops_lab, min_r2=g["min_r2"])
+            if fit is None:
+                print(f"gradient {g['name']}: region {area:.0f} mm2 stays flat (no straight colour ramp)")
+                continue
+            out.append(dict(mask=comp, stops=stops, fit=fit, name=g["name"],
+                            spacing=g["row_spacing_mm"]))
+            for c in stops:
+                masks[c] = masks[c] & ~comp
+            print(f"gradient {g['name']}: region {area:.0f} mm2, ramp at {fit['angle_deg']:.0f} deg, "
+                  f"R2 {fit['r2']:.2f}, stops {[_rgb_str(palette.centroids[c]) for c in stops]}")
+    return out
+
+
 def fill_components(img, scale, border, palette, masks, fill_colors, lw, lw_cover, settings):
     """Contour every fill colour; satinize the components listed in satinize.colors."""
     from shapely import affinity
@@ -1202,6 +1272,7 @@ def fill_components(img, scale, border, palette, masks, fill_colors, lw, lw_cove
     color_keep_lab = {}
     satinized_satins = []      # (cluster, d, pts, width_px)
     satinized_polys = []       # px-space shapely geoms removed from their fill
+    grad_regions = gradient_regions(img, scale, palette, masks, fill_colors, lw, settings)
     print("fills:")
     for c in fill_colors:
         mask = masks[c]
@@ -1245,6 +1316,24 @@ def fill_components(img, scale, border, palette, masks, fill_colors, lw, lw_cove
         color_keep_lab[c] = keep_lab
         _sat_note = f", {n_sat} -> satin" if n_sat else ""
         print(f"  {_rgb_str(palette.centroids[c])}: {len(items)} comps (dropped {dropped}){_sat_note}")
+
+    # Gradient regions join the layer of their first stop colour in stitch order.
+    for gr in grad_regions:
+        c0 = next(c for c in fill_colors if c in gr["stops"])
+        g_paths, g_cents, g_pts, g_keep, _drop, _geoms = contour_paths(
+            gr["mask"], scale.min_comp_px, scale.min_hole_px, scale.tolerance)
+        kl = color_keep_lab[c0]
+        base_id = int(kl.max())
+        hx0 = hexkey(palette.centroids[c0]).lower()
+        for i in range(len(g_paths)):
+            kl[g_keep == i + 1] = base_id + i + 1
+            color_items[c0].append(dict(
+                cent=g_cents[i], pts=g_pts[i], d=g_paths[i], satin=False,
+                lab_id=base_id + i + 1, rgb=palette.centroids[c0],
+                spacing=gr["spacing"], width_px=None, angle=None,
+                gradient=dict(
+                    stops=[tuple(int(v) for v in palette.centroids[c]) for c in gr["stops"]],
+                    offsets=gr["fit"]["offsets"], p1=gr["fit"]["p1"], p2=gr["fit"]["p2"])))
 
     if satinized_satins:
         # each fill component is its own object, so dropping the item removes the
@@ -1437,8 +1526,11 @@ def plan_trims(img, scale, objs, stitch_index, settings):
     return trim_after, n_trims
 
 
-def el(id_, fill_rgb, d, settings, spacing=None, trim_after=False, angle=None):
+def el(id_, fill_rgb, d, settings, spacing=None, trim_after=False, angle=None,
+       gradient_id=None):
     hx = "#%02x%02x%02x" % tuple(int(v) for v in fill_rgb)
+    fill_css = f"url(#{gradient_id})" if gradient_id else hx
+    method = 'inkstitch:fill_method="linear_gradient_fill" ' if gradient_id else ""
     rs = spacing if spacing is not None else settings.row_spacing_mm
     trim = 'inkstitch:trim_after="true" ' if trim_after else ""
     ang = f'inkstitch:angle="{angle:g}" ' if angle is not None else ""
@@ -1455,8 +1547,8 @@ def el(id_, fill_rgb, d, settings, spacing=None, trim_after=False, angle=None):
     # Pin the params the legacy version-0 update used to inject, so a version-4
     # file stitches the same tatami rows: 3 mm max stitch (samples sew 3.0 mm)
     # and 1.5 mm travel between fill rows.
-    return (f'<path id="{id_}" style="fill:{hx};stroke:none" fill-rule="evenodd" '
-            f'inkstitch:row_spacing_mm="{rs}" {ang}'
+    return (f'<path id="{id_}" style="fill:{fill_css};stroke:none" fill-rule="evenodd" '
+            f'{method}inkstitch:row_spacing_mm="{rs}" {ang}'
             f'inkstitch:max_stitch_length_mm="3" inkstitch:running_stitch_length_mm="1.5" '
             f'{underlay}{trim}d="{d}"/>')
 
@@ -1526,6 +1618,18 @@ def emit_svg(out, objs, trim_after, img, scale, settings):
         '<inkstitch:collapse_len_mm>3</inkstitch:collapse_len_mm>'
         '</metadata>\n'
     )
+    grads = [(i, o["gradient"]) for i, o in enumerate(objs) if o.get("gradient")]
+    if grads:
+        p.append("  <defs>\n")
+        for i, gr in grads:
+            p.append(f'    <linearGradient id="g{i}" gradientUnits="userSpaceOnUse" '
+                     f'x1="{gr["p1"][0]:.2f}" y1="{gr["p1"][1]:.2f}" '
+                     f'x2="{gr["p2"][0]:.2f}" y2="{gr["p2"][1]:.2f}">\n')
+            for off, rgb in zip(gr["offsets"], gr["stops"]):
+                p.append(f'      <stop offset="{off:.4f}" style="stop-color:'
+                         f'#{int(rgb[0]):02x}{int(rgb[1]):02x}{int(rgb[2]):02x};stop-opacity:1"/>\n')
+            p.append("    </linearGradient>\n")
+        p.append("  </defs>\n")
     idx = 0
     current_group = None
     for o, tm in zip(objs, trim_after):
@@ -1547,7 +1651,8 @@ def emit_svg(out, objs, trim_after, img, scale, settings):
             p.append("    " + run_el(f"r{idx}", o["rgb"], o["d"], trim_after=tm) + "\n")
         else:
             p.append("    " + el(f"f{idx}", o["rgb"], o["d"], settings, spacing=o["spacing"],
-                                  trim_after=tm, angle=o.get("angle")) + "\n")
+                                  trim_after=tm, angle=o.get("angle"),
+                                  gradient_id=f"g{idx}" if o.get("gradient") else None) + "\n")
         idx += 1
     if current_group is not None:
         p.append('  </g>\n')
