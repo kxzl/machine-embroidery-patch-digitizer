@@ -22,6 +22,7 @@ import argparse
 
 import numpy as np
 from PIL import Image
+from scipy import ndimage
 
 
 def main():
@@ -35,6 +36,10 @@ def main():
                     help="fully transparent below this RGB distance (default 10)")
     ap.add_argument("--t1", type=float, default=40.0,
                     help="fully opaque above this RGB distance (default 40)")
+    ap.add_argument("--keep-enclosed", action="store_true",
+                    help="only background connected to the image edge becomes "
+                         "transparent; pale colours enclosed by the artwork stay opaque "
+                         "(default off: every pixel near the background colour is keyed)")
     args = ap.parse_args()
 
     im = Image.open(args.input).convert("RGB")
@@ -52,6 +57,16 @@ def main():
 
     dist = np.sqrt(((arr - bg) ** 2).sum(axis=-1))
     alpha = np.clip((dist - args.t0) / max(args.t1 - args.t0, 1e-6), 0.0, 1.0)
+    # With --keep-enclosed only background connected to the image edge may become transparent. A pale
+    # colour enclosed by the artwork (an off-white symbol on a black disc, on a white
+    # image margin) can sit within t1 of the background colour and would otherwise be
+    # keyed out in part. Pixels not reachable from the edge stay fully opaque.
+    if args.keep_enclosed:
+        near_bg = dist < args.t1
+        comps, _n = ndimage.label(near_bg, structure=np.ones((3, 3), dtype=int))
+        edge_ids = np.unique(np.concatenate([comps[0], comps[-1], comps[:, 0], comps[:, -1]]))
+        outside = np.isin(comps, edge_ids[edge_ids > 0])
+        alpha = np.where(near_bg & ~outside, 1.0, alpha)
 
     # un-blend the feather: observed = a * foreground + (1 - a) * background
     a3 = alpha[..., None]
