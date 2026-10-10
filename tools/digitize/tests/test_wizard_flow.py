@@ -308,7 +308,8 @@ class ScreensDemo(unittest.TestCase):
     def test_every_screen_is_rendered(self):
         from tools.digitize.wizard import screens_demo
         with tempfile.TemporaryDirectory() as t:
-            self.assertEqual(screens_demo.main([t]), 0)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(screens_demo.main([t]), 0)
             files = sorted(Path(t).glob("*.svg"))
             self.assertEqual(len(files), 9)
             text = html.unescape(re.sub(r"<[^>]+>", "", "\n".join(f.read_text() for f in files))).replace("\xa0", " ")
