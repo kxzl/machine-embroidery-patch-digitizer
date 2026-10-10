@@ -21,6 +21,55 @@ image → color separation → vectorize (fills + satin outlines + satin border)
 
 ---
 
+## Guided mode
+
+For people who do not want to learn flags. You answer a few questions and get an SVG and a VP3.
+
+```bash
+python3 digitize.py setup     # once: needs uv (https://docs.astral.sh/uv/), takes a few minutes
+python3 digitize.py doctor    # optional: checks that everything is ready
+python3 digitize.py           # start the wizard
+```
+
+Linux and macOS work directly. On Windows use WSL2. The wizard needs a real terminal.
+If it finds none it prints the matching `run.sh` command and stops (exit code 2).
+
+The steps, one question per screen:
+
+1. **Which picture?** Drag the file into the window or type its path. png, jpg, jpeg and webp.
+2. **Picture check.** Plain advice, nothing blocks you. It tells you whether the background is
+   transparent (best), plain (the wizard offers to remove it first) or busy (the whole picture
+   gets stitched). It also says how many pixels per mm the picture gives. Below 3 pixels per mm
+   the edges come out rough and fine detail is lost; the advice names how many pixels wide the
+   artwork should be.
+3. **Hoop.** 120 x 120 mm (most patches), 260 x 200 mm (large back patch) or a custom size from
+   20 to 400 mm per side. The stitching never goes outside this area.
+4. **Patch size.** The longest side of the patch: 100 mm by default, the whole hoop, or a custom
+   size. The picture is never rotated. If turning it 90 degrees would allow a bigger patch, the
+   wizard says so.
+5. **Colours.** Let the program decide (up to 6), fewer (up to 4: fewer thread changes, simpler
+   look) or more (up to 8: more detail, more thread changes).
+6. **Your choices.** One summary, then it runs. It takes about a minute.
+7. **Results.** Stitched size in mm, stitch count, colour changes, the thread colours in sewing
+   order, the files and any warnings. The same text is saved as `summary.txt`.
+
+The stitched file comes out a little bigger than the design the size flags measure (0.3 to 0.5 mm
+on plain shapes, about 3 mm when the artwork touches the picture edge). The wizard therefore
+measures the VP3 itself. If it is over the hoop area it runs once more with a smaller Fit box. If it
+is still over, the summary says **TOO BIG FOR THE HOOP**, the exit code is 1, and you should not sew
+the file. It also warns when the design ends within 2 mm of the hoop area edge.
+
+Files go to `output/<name>/`, where `<name>` is the picture's file name with unusual characters
+replaced by `-` (`Scavenger's Daughter.png` becomes `Scavenger-s-Daughter`). If that folder exists,
+the wizard asks: keep both (the new one gets `-2`, `-3`), replace, or cancel. Nothing is replaced
+without asking. The work happens in a hidden temporary folder inside `output/` and moves into
+place only when the run succeeded, so Ctrl-C or an error leaves no half-written folder.
+
+Not in guided mode: SVG input, other machine formats, automatic rotation, re-run files. Use
+`tools/digitize/run.sh` for those (see below).
+
+---
+
 ## Quick start
 
 ```bash
