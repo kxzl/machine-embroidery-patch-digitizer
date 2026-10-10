@@ -79,7 +79,51 @@ _Avoid_: Minimum width, satin limit
 
 ### Scale
 
+**Hoop**:
+The frame an operator sews in, named by the width and height in mm of the area
+it lets the machine stitch. The operator picks one before sizing a patch.
+_Avoid_: Frame, ring
+
 **Fit box**:
-The largest area a machine can stitch, given as a width and a height in mm. The
-Artwork is scaled down until it fits entirely inside it.
+The largest area the stitched Artwork may occupy, given as a width and a height
+in mm. It is the Hoop's stitching area. The Artwork is scaled down until it fits
+entirely inside it and is never rotated to fit.
 _Avoid_: Hoop size, target size, canvas size
+
+**Patch size**:
+The longest side of the finished Artwork in mm, as the operator asks for it.
+Never larger than the Fit box; when both are given, the smaller result wins.
+_Avoid_: Scale, output size
+
+### Generated artwork
+
+**Style family**:
+One of four looks a patch's generated artwork is drawn in: Gritty, Detailed,
+Cartoon or Pixel art. Each patch gets exactly one, and the patch set must contain
+all four.
+_Avoid_: Theme, genre, art style
+
+**Tonal step**:
+A flat, hard-edged shade inside one colour family (shadow, mid, light) that models
+a form without blending. Every tonal step is its own Thread colour.
+_Avoid_: Shade, shading layer
+
+**Gradient region**:
+A closed area of Artwork whose colour ramps along one straight axis between two or
+more Thread colours, stitched by interleaving rows of neighbouring colours. Each
+stop colour is a Thread colour.
+_Avoid_: Blend, fade, soft shading
+
+**Detail limit**:
+The thinnest line and smallest isolated spot a prompt may ask for, set from the
+patch's finished size and stated as a share of the patch width.
+_Avoid_: Minimum feature size, resolution
+
+**Thread budget**:
+The most Thread colours one patch may use, set by its finished size. Every stop
+of a Gradient region counts against it.
+_Avoid_: Colour count, palette size
+
+**Candidate**:
+One generated image of a patch, judged on its stitch plan as well as its look.
+_Avoid_: Variant, output, render
