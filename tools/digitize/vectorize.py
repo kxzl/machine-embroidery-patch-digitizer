@@ -805,6 +805,7 @@ def detect_border(img, scale, settings):
     n_tiny_parts = 0
     n_thin_parts = 0
     n_runout = 0       # parts given a running-stitch outline
+    runout_seen = set()   # silhouette components whose outline is already emitted
     for i in range(1, n_parts + 1):
         part = (parts == i)
         cnts = measure.find_contours(np.pad(part, 1), 0.5)
@@ -837,6 +838,13 @@ def detect_border(img, scale, settings):
             if sil_lab is None:
                 sil_lab, _ = ndimage.label(img.silhouette)
             comp = _original_part(sil_lab, part)
+            # several thin parts of one silhouette component all trace that
+            # component's whole outline: emit it once, or the same line is
+            # stitched (and bean-stitched) twice over the border
+            comp_key = (int(comp.sum()), int(comp.argmax()))
+            if comp_key in runout_seen:
+                continue
+            runout_seen.add(comp_key)
             ocnts = measure.find_contours(np.pad(comp, 1), 0.5)
             if ocnts:
                 opoly = measure.approximate_polygon(max(ocnts, key=_poly_area) - 1,
