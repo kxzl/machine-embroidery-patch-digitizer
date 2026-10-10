@@ -43,6 +43,13 @@ echo zip > "work/$BASE.zip"; echo "stderr text" > "work/$BASE.err"
 case "$MODE" in
   fail) echo "boom"; exit 1 ;;
   fail_second) if [[ $(grep -c -- '--fit-mm' "$LOG") -ge 2 ]]; then echo "boom"; exit 1; fi ;;
+  satin_per_pass) if [[ $(grep -c -- '--fit-mm' "$LOG") -ge 2 ]]; then
+      echo "warning: satin p2a is 0.95 mm wide, below Ink/Stitch's 1.0 mm gate -- it will stitch as running stitch"
+    else
+      echo "warning: satin p1a is 0.70 mm wide, below Ink/Stitch's 1.0 mm gate -- it will stitch as running stitch"
+      echo "warning: satin p1b is 0.80 mm wide, below Ink/Stitch's 1.0 mm gate -- it will stitch as running stitch"
+      echo "warning: satin p1c is 0.90 mm wide, below Ink/Stitch's 1.0 mm gate -- it will stitch as running stitch"
+    fi ;;
   hang) sleep 300 & echo $! > "$ROOT/childpid"; echo $$ > "$ROOT/started"; wait ;;
 esac
 echo "== exporting VP3"; echo vp3 > "output_vp3/$BASE.vp3"
@@ -441,6 +448,15 @@ class RunJob(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in res.folder.iterdir()),
                          ["My-Patch.svg", "My-Patch.vp3", "My-Patch_coverage.png", "My-Patch_stitchplan.png",
                           "summary.txt"])
+
+    def test_warnings_come_from_the_kept_pass_only(self):
+        seq = Seq(meas(1229, 1000), meas(1198, 980))        # pass 1 is too big, pass 2 fits
+        _root, _spec, res = self.job(mode="satin_per_pass", measure=seq)
+        self.assertEqual(res.status, "ok")
+        joined = " ".join(res.warnings)
+        self.assertIn("1 thin line is narrower", joined)    # only the kept pass: one line, 0.95 mm
+        self.assertIn("0.95 mm", joined)
+        self.assertNotIn("0.70", joined)                    # the discarded first pass is not counted
 
     def test_no_second_pass_when_inside(self):
         seq = Seq(meas(1000, 800))

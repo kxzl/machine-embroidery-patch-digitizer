@@ -607,6 +607,7 @@ def run_job(spec: JobSpec, root: Path = ROOT, *, policy: str = KEEP_BOTH,
     try:
         passes: List[Pass] = []
         kept: List[Tuple[str, Path]] = []      # (base, dest folder) of every finished pass
+        kept_lines: List[List[str]] = []       # pipeline output of every finished pass
         log: List[str] = []
         box = spec.hoop
         note = ""
@@ -643,6 +644,7 @@ def run_job(spec: JobSpec, root: Path = ROOT, *, policy: str = KEEP_BOTH,
             m = measure(dest / (base + ".vp3"))
             passes.append(Pass(number, box, m))
             kept.append((base, dest))
+            kept_lines.append(lines)
             over = overshoot(m, spec.hoop)
             if over == (0.0, 0.0) or number == 2:
                 break
@@ -655,7 +657,7 @@ def run_job(spec: JobSpec, root: Path = ROOT, *, policy: str = KEEP_BOTH,
         m = final_pass.measure
         inside = overshoot(m, spec.hoop) == (0.0, 0.0)
         result = JobResult("ok" if inside else "too_big", spec, slug, passes=passes, measure=m)
-        result.warnings = _pipeline_warnings(log) + edge_warnings(m, spec.hoop)
+        result.warnings = _pipeline_warnings(kept_lines[-1]) + edge_warnings(m, spec.hoop)
         if note:
             result.warnings.append(note)
         if not inside:
