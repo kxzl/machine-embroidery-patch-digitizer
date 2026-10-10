@@ -110,7 +110,7 @@ class RichPrompter(Prompter):
         t.add_row("Stitched size", "%s x %s mm   (hoop area %s)" % (fmt_mm(m.width_mm), fmt_mm(m.height_mm),
                                                                        fmt_box(spec.hoop)))
         t.add_row("Stitches", format(m.stitches, ","))
-        t.add_row("Colour changes", "%d   (%d thread colours)" % (m.color_changes, len(m.threads)))
+        t.add_row("Colour changes", "%d   (%d thread colours)" % (m.color_changes, m.thread_colours))
         order = Text()
         for i, hexv in enumerate(m.threads, 1):
             order.append("%d " % i)

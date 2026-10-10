@@ -172,6 +172,16 @@ class FitMath(unittest.TestCase):
                          ["--colors", "4", "--fit-mm", "259.7x199.2", "--key-background"])
 
 
+class ThreadCount(unittest.TestCase):
+    def test_a_colour_sewn_twice_is_one_thread_colour(self):
+        m = Measure(1000, 800, 5000, 3, ["#f1c40f", "#c0392b", "#1a1a1a", "#c0392b"])
+        self.assertEqual(m.thread_colours, 3)
+        spec = JobSpec(Path("a.png"))
+        text = core.summary_text(core.JobResult("ok", spec, "a", Path("output/a"), measure=m))
+        self.assertIn("3 (3 thread colours)", text)
+        self.assertIn("4. #c0392b", text)                    # the sewing order keeps the repeat
+
+
 class Advice(unittest.TestCase):
     def test_resolution(self):
         rep = ImageReport(width=1000, height=800, design_w=1000, design_h=800)

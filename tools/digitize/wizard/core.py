@@ -72,6 +72,11 @@ class Measure:
     threads: List[str] = field(default_factory=list)   # "#rrggbb" in sewing order
 
     @property
+    def thread_colours(self) -> int:
+        """Distinct spools: a colour sewn twice is still one Thread colour."""
+        return len(set(self.threads))
+
+    @property
     def width_mm(self) -> float:
         return self.width10 / 10.0
 
@@ -474,7 +479,7 @@ def summary_text(result: JobResult) -> str:
     if m:
         lines += ["", "%-17s%s x %s mm" % ("Stitched size:", fmt_mm(m.width_mm), fmt_mm(m.height_mm)),
                   "%-17s%s" % ("Stitches:", format(m.stitches, ",")),
-                  "%-17s%d (%d thread colours)" % ("Colour changes:", m.color_changes, len(m.threads)),
+                  "%-17s%d (%d thread colours)" % ("Colour changes:", m.color_changes, m.thread_colours),
                   "Sewing order:"]
         lines += ["  %d. %s" % (i, h) for i, h in enumerate(m.threads, 1)]
     if len(result.passes) > 1:

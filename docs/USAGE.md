@@ -31,7 +31,8 @@ python3 digitize.py doctor    # optional: checks that everything is ready
 python3 digitize.py           # start the wizard
 ```
 
-Linux and macOS work directly. On Windows use WSL2. The wizard needs a real terminal.
+Tested on Linux. macOS should work but has not been tried. On Windows use WSL2.
+The wizard needs a real terminal.
 If it finds none it prints the matching `run.sh` command and stops (exit code 2).
 
 The steps, one question per screen:
