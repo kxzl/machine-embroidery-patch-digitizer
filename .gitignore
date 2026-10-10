@@ -13,6 +13,7 @@ input/
 output_inkstitch_svg/
 output_vp3/
 Embroidery_samples/
+patch_descriptions/
 
 # generated pipeline artifacts
 work/
