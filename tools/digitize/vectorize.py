@@ -139,6 +139,7 @@ class Settings:
     gradients: list = field(default_factory=list)   # [{name, stops, min_area_mm2, min_r2, row_spacing_mm}]
     thin_lines: str = "widen"     # outline runs under the satin gate: "widen" to satin, or "run" = bean stitch
     outline_order: str = "centroid"   # outline stitch order: by "centroid" (default) or by path "endpoint"
+    outline_zigzag_spacing_mm: float | None = None   # satin zigzag spacing on outline satins (None = Ink/Stitch 0.4)
     # algorithm constants (module-level defaults, overridable per class later)
     satin_min_mm: float = SATIN_MIN_MM
     satin_gate_mm: float = SATIN_GATE_MM
@@ -446,6 +447,17 @@ def build_settings(flags, cfg):
         print("warning: ignoring non-numeric trim.min_mm")
         _trim_min = TRIM_MIN_MM
 
+    # --- outline_zigzag_spacing_mm: wider zigzag on outline satins = less thread ----
+    _ozz = cfg.get("outline_zigzag_spacing_mm")
+    try:
+        _ozz = float(_ozz) if _ozz is not None else None
+        if _ozz is not None and not 0.3 <= _ozz <= 0.8:
+            print(f"warning: ignoring outline_zigzag_spacing_mm {_ozz} (use 0.3 to 0.8)")
+            _ozz = None
+    except (TypeError, ValueError):
+        print("warning: ignoring non-numeric outline_zigzag_spacing_mm")
+        _ozz = None
+
     # --- outline_order: how the outline segments are sequenced -------------------
     _oo = str(cfg.get("outline_order", "centroid")).strip().lower()
     if _oo not in ("centroid", "endpoint"):
@@ -498,7 +510,7 @@ def build_settings(flags, cfg):
         satin_underlay_inset_mm=satin_underlay_inset_mm,
         border_zigzag_spacing_mm=border_zigzag, fabric_color=fabric_color,
         gradients=_gradients, thin_lines=_thin, outline_order=_oo,
-        trim_min_mm=_trim_min,
+        trim_min_mm=_trim_min, outline_zigzag_spacing_mm=_ozz,
     )
 
 
@@ -1717,7 +1729,8 @@ def emit_svg(out, objs, trim_after, img, scale, settings):
         if o["satin"]:
             gid = o["group_id"]
             underlay = settings.satin_underlay and gid in ("outlines", "border")
-            zigzag = settings.border_zigzag_spacing_mm if gid == "border" else None
+            zigzag = (settings.border_zigzag_spacing_mm if gid == "border"
+                      else settings.outline_zigzag_spacing_mm if gid == "outlines" else None)
             p.append("    " + satin_el(f"s{idx}", o["rgb"], o["d"], o["width_px"],
                                        scale, settings, trim_after=tm,
                                        underlay=underlay, zigzag_mm=zigzag,
