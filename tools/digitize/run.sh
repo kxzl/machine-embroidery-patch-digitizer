@@ -6,6 +6,7 @@
 #   --no-trim | --trim-mm N | --config F
 #   --width-mm W | --height-mm H | --border-color HEX | --skip-colors HEX[,HEX]
 #   --size-mm N | --key-background  (key a flat background to alpha first)
+#   --fit-mm WxH  (raster inputs: Fit box in mm; dropped for svg inputs)
 #   --overlap-mm N  (svg inputs: max overlap of a later colour over an earlier)
 #   --seam-pull-mm MM  (svg inputs: pull a later colour back off a colour edge so
 #                   its thread finishes on the drawn edge; default 0.2)
@@ -36,7 +37,7 @@ while [[ $# -gt 0 ]]; do
     --colors|--border-mm|--trim-mm|--density|--satin-max-mm|--size-mm|\
     --overlap-mm|--seam-pull-mm|--width-mm|--height-mm|--border-color|--skip-colors|\
     --fill-angle|--satinize-colors|--palette|--palette-mode|\
-    --underlap-mm|--raster-pull-mm|--profile)
+    --underlap-mm|--raster-pull-mm|--profile|--fit-mm)
       FLAGS+=("$a" "$1"); shift ;;
     --key-background) KEY_BG=1 ;;
     --no-export) NO_EXPORT=1 ;;
@@ -84,8 +85,8 @@ if [[ "$EXT_LC" == "svg" ]]; then
   while [[ $i -lt ${#FLAGS[@]} ]]; do
     a="${FLAGS[$i]}"
     case "$a" in
-      --palette|--palette-mode|--underlap-mm|--raster-pull-mm|--profile) i=$((i + 1)) ;;
-      --palette=*|--palette-mode=*|--underlap-mm=*|--raster-pull-mm=*|--profile=*) ;;
+      --palette|--palette-mode|--underlap-mm|--raster-pull-mm|--profile|--fit-mm) i=$((i + 1)) ;;
+      --palette=*|--palette-mode=*|--underlap-mm=*|--raster-pull-mm=*|--profile=*|--fit-mm=*) ;;
       --no-skip-last) ;;
       *) FWD+=("$a") ;;
     esac
