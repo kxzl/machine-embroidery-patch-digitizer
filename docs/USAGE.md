@@ -457,6 +457,11 @@ tools/digitize/run.sh --key-background --keep-enclosed --no-satin-extend --confi
   junction follow each other with no jump and no cut. Default `centroid`.
 - `trim: min_mm: 3` never cuts a jump of 3 mm or less (Ink/Stitch adds no lock
   stitches below its 3 mm collapse length). Default 2.
+- `outline_zigzag_spacing_mm: 0.5` (0.3 to 0.8) sets the zigzag spacing of the outline
+  satins; wider means less thread per mm of line. Default: Ink/Stitch's 0.4.
+- For bold black lines keep `thin_lines: widen` (the default) and use the rest of this
+  recipe: the pile-ups come from the number of cuts and from junctions, not from the
+  line width. Use `thin_lines: run` only when you want hairlines kept thin.
 - `underlap_mm: 0.3` lowers the underlap so each fill overlaps its neighbours by
   less.
 - `trim: threshold_mm: 12` raises the trim threshold to 12 mm, so the machine

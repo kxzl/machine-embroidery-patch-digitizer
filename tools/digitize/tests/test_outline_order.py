@@ -81,6 +81,22 @@ class OutlineOrderTests(unittest.TestCase):
             high, _ = run(tmp, "outline_order: endpoint\ntrim:\n  min_mm: 6.0\n")
         self.assertLessEqual(outline_trims(high)[0], outline_trims(low)[0])
 
+    def test_outline_zigzag_spacing_is_written_to_outline_satins_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plain, _ = run(tmp, "thin_lines: widen\n")
+            wide, _ = run(tmp, "thin_lines: widen\noutline_zigzag_spacing_mm: 0.5\n")
+        g = lambda svg: re.search(r'id="outlines">(.*?)</g>', svg, re.S).group(1)
+        self.assertNotIn("zigzag_spacing_mm", g(plain))
+        self.assertGreaterEqual(g(wide).count('zigzag_spacing_mm="0.5"'), 1)
+        self.assertEqual(g(wide).count("satin_column"), g(wide).count('zigzag_spacing_mm="0.5"'))
+
+    def test_bad_zigzag_value_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plain, _ = run(tmp)
+            svg, log = run(tmp, "outline_zigzag_spacing_mm: 9\n")
+        self.assertIn("ignoring outline_zigzag_spacing_mm", log)
+        self.assertEqual(plain, svg)
+
     def test_bad_values_are_ignored_with_warnings(self):
         with tempfile.TemporaryDirectory() as tmp:
             plain, _ = run(tmp)
