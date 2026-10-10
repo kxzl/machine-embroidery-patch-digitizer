@@ -172,4 +172,7 @@ echo "== stitch plan"
 .venv/bin/python tools/digitize/preview.py "output_vp3/$BASE.vp3" \
   "output_vp3/${BASE}_coverage.png" --width 1600 --thread-mm 0.5 "${PREVIEW_BG[@]}"
 
+echo "== jam check"
+.venv/bin/python tools/digitize/qa/jam_check.py "output_vp3/$BASE.vp3" || true
+
 echo "== done: $OUT_SVG and output_vp3/$BASE.vp3"
