@@ -136,6 +136,10 @@ if [[ "$NO_EXPORT" == "1" ]]; then
   exit 0
 fi
 
+echo "== satin precheck"
+PYTHONPATH=tools/wxstub INKSTITCH_OFFLINE_SCRIPT=true \
+  .venv/bin/python tools/digitize/qa/satin_precheck.py "$OUT_SVG" --fix "$OUT_SVG" || true
+
 echo "== exporting VP3"
 PYTHONPATH=tools/wxstub INKSTITCH_OFFLINE_SCRIPT=true \
   .venv/bin/python inkstitch/inkstitch.py --extension=zip --format-vp3=True \
