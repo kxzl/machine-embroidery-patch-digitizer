@@ -23,6 +23,7 @@ FLAGS=()
 IMG=""
 NO_EXPORT=0
 KEY_BG=0
+KEEP_ENCLOSED=""
 BACKGROUND=""
 CONFIG=""
 while [[ $# -gt 0 ]]; do
@@ -39,6 +40,7 @@ while [[ $# -gt 0 ]]; do
     --underlap-mm|--raster-pull-mm|--profile)
       FLAGS+=("$a" "$1"); shift ;;
     --key-background) KEY_BG=1 ;;
+    --keep-enclosed) KEEP_ENCLOSED="--keep-enclosed" ;;
     --no-export) NO_EXPORT=1 ;;
     -*) FLAGS+=("$a") ;;
     *) IMG="$a" ;;
@@ -120,7 +122,7 @@ if [[ "$KEY_BG" == "1" ]]; then
     echo "note: --key-background applies to raster inputs only; ignoring for $IMG"
   else
     KEYED="work/${BASE}_keyed.png"
-    .venv/bin/python tools/digitize/key_background.py "$IMG" "$KEYED"
+    .venv/bin/python tools/digitize/key_background.py "$IMG" "$KEYED" $KEEP_ENCLOSED
     IMG="$KEYED"
   fi
 fi
