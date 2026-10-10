@@ -1,22 +1,28 @@
-# Credits & Attribution
+# Credits and attribution
 
-The sample patch artwork used to build and demonstrate this pipeline was
-downloaded from the [Dungeon Crawler Carl wiki — Patches](https://dungeon-crawler-carl.fandom.com/wiki/Category:Patches)
-(wiki content is [CC-BY-SA](https://www.fandom.com/licensing)). **All artwork
-remains © its original creators** and is used here for personal, non-commercial
-digitizing/testing only.
+This repository shows renders of artwork to demonstrate the pipeline. **All artwork remains the property of its creators.** Patch subjects are catalogued on the [Dungeon Crawler Carl wiki](https://dungeon-crawler-carl.fandom.com/wiki/Category:Patches) (wiki text is [CC-BY-SA](https://www.fandom.com/licensing)). If you are a creator named here and have a question about a render, contact the repository owner on GitHub (kxzl).
+
+## Artwork by other people
 
 | Sample file | Patch | Artist | Source |
 |---|---|---|---|
 | `Bomb_patch.webp` | Bomb Upgrade Patch | u/waterkangaroo (Reddit) | [Bomb Upgrade Patch](https://dungeon-crawler-carl.fandom.com/wiki/Bomb_Upgrade_Patch) |
 | `Book_burner_patch.PNG.webp` | Book Burner Patch | u/waterkangaroo (Reddit) | [Book Burner Patch](https://dungeon-crawler-carl.fandom.com/wiki/Book_Burner_Patch) |
 | `Skyfowl_patch.webp` | Skyfowl Upgrade Patch | Waterkangaroo | [Skyfowl Upgrade Patch](https://dungeon-crawler-carl.fandom.com/wiki/Skyfowl_Upgrade_Patch) |
-| `Scavenger's_Daughter_by_the_dusty_druid.webp` | Scavenger's Daughter Upgrade Patch | @thedustydruid (Instagram) | [Scavenger's Daughter Upgrade Patch](https://dungeon-crawler-carl.fandom.com/wiki/Scavenger%27s_Daughter_Upgrade_Patch) |
-| `Gemini_Generated_Image_*.jpg` | — (AI-generated) | — (Google Gemini) | — |
+| `Scavenger's_Daughter_by_the_dusty_druid.webp` and the layered SVG versions | Scavenger's Daughter Upgrade Patch | @thedustydruid (Instagram) | [Scavenger's Daughter Upgrade Patch](https://dungeon-crawler-carl.fandom.com/wiki/Scavenger%27s_Daughter_Upgrade_Patch) |
 
-Digitized derivatives — `Scavenger's Daughter Upgrade Patch.svg` / `.vp3` — are
-produced from the artwork above by this pipeline and are likewise for personal use.
+## AI-generated images
 
-> The original raster sources are **not** committed to this repository (see
-> `.gitignore`). The images under `docs/assets/` are preview renders produced by
-> the pipeline for documentation only.
+The gallery source images in the README (`input/nano_banana/*.png`: Bomb, Four-Leaf Clover, Midnight Epicure, Peace, Reaper Spider, Skyfowl, and the Back Nine Skulls source) and the `Gemini_Generated_Image_*.jpg` files were generated with Google Gemini from prompts written by the repository owner.
+
+## Derived files
+
+- The stitch plans, coverage renders and SVG renders in `docs/assets/` are pipeline output made from the images above. `docs/assets/render-manifest.md` lists the exact command for each.
+- The hero image shows a two-colour version of Scavenger's Daughter (ink and paper swapped by `tools/digitize/invert_ink.py`), made from the artist's layered SVG.
+- `Scavenger's Daughter Upgrade Patch.svg` and `.vp3` are digitized derivatives of the same artwork.
+
+## Tools
+
+Embroidery export is done by [Ink/Stitch](https://inkstitch.org).
+
+The original sample pictures are not committed to this repository (see `.gitignore`). Only the preview renders in `docs/assets/` are.
