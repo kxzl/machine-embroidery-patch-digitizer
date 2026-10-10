@@ -25,6 +25,7 @@ work/
 *.zip
 *.err
 *.svg
+opencode.json
 
 # keep committed documentation assets
 !docs/assets/
