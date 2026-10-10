@@ -26,6 +26,7 @@ Usage:
                                      [--satin-max-mm W] [--fill-angle DEG]
                                      [--satinize-colors HEX[,HEX]]
                                      [--palette HEX[,HEX]] [--palette-mode auto|kmeans]
+                                     [--size-mm N] [--fit-mm WxH]
                                      [--trim] [--no-trim] [--trim-mm N] [--config F]
                                      [input.webp] [output.svg]
 """
@@ -51,7 +52,7 @@ from skeleton import satin_segments
 _VALUE_FLAGS = {"--colors", "--border-mm", "--trim-mm", "--config", "--density",
                 "--satin-max-mm", "--size-mm", "--fill-angle", "--satinize-colors",
                 "--palette", "--palette-mode", "--underlap-mm", "--raster-pull-mm",
-                "--profile"}
+                "--profile", "--fit-mm"}
 
 # module-level defaults (docs reference these names); build_settings resolves the
 # per-run values into a Settings instance.
@@ -102,6 +103,8 @@ class Settings:
     n_colors: int = 5
     colors_given: bool = False
     size_mm: float = 100.0     # longer side of finished design (mm)
+    size_given: bool = False   # --size-mm was passed (else size_mm is just the default)
+    fit_mm: tuple | None = None  # (W, H) Fit box in mm from --fit-mm, or None
     no_border: bool = False
     border_mm: float = 2.5
     border_mode: str = "auto"
@@ -251,6 +254,20 @@ def _parse_palette(value):
     return out
 
 
+def parse_fit_mm(value):
+    """Parse ``--fit-mm WxH`` (``x`` or ``X``) into ``(W, H)`` mm; exit 2 if invalid."""
+    m = None
+    if isinstance(value, str):
+        m = re.fullmatch(r"\s*(\d+(?:\.\d*)?|\.\d+)\s*[xX]\s*(\d+(?:\.\d*)?|\.\d+)\s*", value)
+    if m:
+        w, h = float(m.group(1)), float(m.group(2))
+        if w > 0 and h > 0:
+            return w, h
+    sys.stderr.write(f"error: --fit-mm needs two positive numbers as WIDTHxHEIGHT in mm "
+                     f"(for example --fit-mm 120x120), got {value!r}\n")
+    sys.exit(2)
+
+
 def build_settings(flags, cfg):
     """Resolve CLI flags and YAML config into a Settings instance.
 
@@ -285,6 +302,9 @@ def build_settings(flags, cfg):
     satin_extend = flag("no-satin-extend", False) is not True
     satin_max_arg = flag("satin-max-mm", None)
     size_mm = float(flag("size-mm", "100"))
+    size_given = flag("size-mm", None) is not None
+    fit_arg = flag("fit-mm", None)
+    fit_mm = None if fit_arg is None else parse_fit_mm(fit_arg)
     row_spacing_mm = float(profile_value("density", ROW_SPACING_MM))
     satin_max_mm = SATIN_MAX_MM
 
@@ -421,7 +441,8 @@ def build_settings(flags, cfg):
               f"border_zigzag_spacing_mm={border_zigzag}, fabric_color={fabric_color or 'unset'})")
 
     return Settings(
-        n_colors=n_colors, colors_given=colors_given, size_mm=size_mm, no_border=no_border, border_mm=border_mm,
+        n_colors=n_colors, colors_given=colors_given, size_mm=size_mm, size_given=size_given,
+        fit_mm=fit_mm, no_border=no_border, border_mm=border_mm,
         border_mode=_border_mode, trim=trim, trim_threshold_mm=trim_threshold_mm,
         row_spacing_mm=row_spacing_mm, no_satin=no_satin, satin_extend=satin_extend, fill_angle=fill_angle,
         angle_map=_angle, density_map=_density, satinize_colors=satinize_colors,
@@ -462,6 +483,36 @@ def load_image(path):
 
     return ImageData(H=H, W=W, arr=arr, transparent=transparent,
                      has_transparency=has_transparency, silhouette=silhouette, rgb=rgb)
+
+
+def resolve_px_per_mm(design_w, design_h, size_mm, size_given, fit_mm):
+    """Source pixels per mm for a design of ``design_w`` x ``design_h`` px.
+
+    ``--size-mm`` alone (or neither flag): the longest side is ``size_mm``.
+    ``--fit-mm`` alone: the design fills the box, whichever axis hits it first.
+    Both: the smaller design wins, i.e. the larger px/mm.
+    Returns ``(px_per_mm, rule, note)``; ``note`` is None unless both were given.
+    """
+    size_ppm = max(design_w, design_h) / size_mm
+    if fit_mm is None:
+        rule = f"--size-mm {size_mm:g}, longest side" if size_given else f"default {size_mm:g} mm longest side"
+        return size_ppm, rule, None
+    fw, fh = fit_mm
+    fit_ppm = max(design_w / fw, design_h / fh)
+    limit = "width" if design_w / fw >= design_h / fh else "height"
+    box = f"{fw:g}x{fh:g}"
+    if not size_given:
+        return fit_ppm, f"fills --fit-mm {box}, {limit} limits", None
+    if fit_ppm > size_ppm:
+        return fit_ppm, f"--fit-mm {box} limited it, {limit} limits", (
+            f"note: --fit-mm {box} limited the size; --size-mm {size_mm:g} alone would give a "
+            f"longest side of {max(design_w, design_h) / size_ppm:.1f} mm, larger than the box")
+    if size_ppm > fit_ppm:
+        return size_ppm, f"--size-mm {size_mm:g} limited it, longest side", (
+            f"note: --size-mm {size_mm:g} limited the size; --fit-mm {box} alone would allow a "
+            f"longest side of {max(design_w, design_h) / fit_ppm:.1f} mm")
+    return size_ppm, f"--size-mm {size_mm:g} and --fit-mm {box} give the same size", (
+        f"note: --size-mm {size_mm:g} and --fit-mm {box} give the same size")
 
 
 def design_scale(img, settings):
@@ -507,11 +558,15 @@ def design_scale(img, settings):
         else:
             design_w, design_h = W, H
 
-    px_per_mm = max(design_w, design_h) / settings.size_mm
+    px_per_mm, rule, note = resolve_px_per_mm(
+        design_w, design_h, settings.size_mm, settings.size_given, settings.fit_mm)
     scale = 1.0 / px_per_mm
+    print(f"design size: {design_w / px_per_mm:.1f} x {design_h / px_per_mm:.1f} mm ({rule})")
+    if note:
+        print(note)
     if px_per_mm < 3.0:
         print(f"warning: source is too coarse to stitch well ({1 / px_per_mm:.2f} mm per source pixel at "
-              f"{settings.size_mm:.0f} mm; need >= 3 px/mm). Supply a larger source image.")
+              f"{max(design_w, design_h) / px_per_mm:.0f} mm; need >= 3 px/mm). Supply a larger source image.")
     Wmm = W * scale
     Hmm = H * scale
 
