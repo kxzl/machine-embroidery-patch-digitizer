@@ -26,6 +26,7 @@ Usage:
                                      [--satin-max-mm W] [--fill-angle DEG]
                                      [--satinize-colors HEX[,HEX]]
                                      [--palette HEX[,HEX]] [--palette-mode auto|kmeans]
+                                     [--size-mm N] [--fit-mm WxH]
                                      [--trim] [--no-trim] [--trim-mm N] [--config F]
                                      [input.webp] [output.svg]
 """
@@ -45,13 +46,14 @@ from scipy.spatial import cKDTree
 from shapely.geometry import Polygon
 from skimage import color, measure, morphology
 
+import gradient as gradfit
 import satinize
 from skeleton import satin_segments
 
 _VALUE_FLAGS = {"--colors", "--border-mm", "--trim-mm", "--config", "--density",
                 "--satin-max-mm", "--size-mm", "--fill-angle", "--satinize-colors",
                 "--palette", "--palette-mode", "--underlap-mm", "--raster-pull-mm",
-                "--profile"}
+                "--profile", "--fit-mm"}
 
 # module-level defaults (docs reference these names); build_settings resolves the
 # per-run values into a Settings instance.
@@ -102,6 +104,8 @@ class Settings:
     n_colors: int = 5
     colors_given: bool = False
     size_mm: float = 100.0     # longer side of finished design (mm)
+    size_given: bool = False   # --size-mm was passed (else size_mm is just the default)
+    fit_mm: tuple | None = None  # (W, H) Fit box in mm from --fit-mm, or None
     no_border: bool = False
     border_mm: float = 2.5
     border_mode: str = "auto"
@@ -132,6 +136,10 @@ class Settings:
     satin_underlay_inset_mm: float = 0.4
     border_zigzag_spacing_mm: float | None = None
     fabric_color: str = ""
+    gradients: list = field(default_factory=list)   # [{name, stops, min_area_mm2, min_r2, row_spacing_mm}]
+    thin_lines: str = "widen"     # outline runs under the satin gate: "widen" to satin, or "run" = bean stitch
+    outline_order: str = "centroid"   # outline stitch order: by "centroid" (default) or by path "endpoint"
+    outline_zigzag_spacing_mm: float | None = None   # satin zigzag spacing on outline satins (None = Ink/Stitch 0.4)
     # algorithm constants (module-level defaults, overridable per class later)
     satin_min_mm: float = SATIN_MIN_MM
     satin_gate_mm: float = SATIN_GATE_MM
@@ -251,6 +259,20 @@ def _parse_palette(value):
     return out
 
 
+def parse_fit_mm(value):
+    """Parse ``--fit-mm WxH`` (``x`` or ``X``) into ``(W, H)`` mm; exit 2 if invalid."""
+    m = None
+    if isinstance(value, str):
+        m = re.fullmatch(r"\s*(\d+(?:\.\d*)?|\.\d+)\s*[xX]\s*(\d+(?:\.\d*)?|\.\d+)\s*", value)
+    if m:
+        w, h = float(m.group(1)), float(m.group(2))
+        if w > 0 and h > 0:
+            return w, h
+    sys.stderr.write(f"error: --fit-mm needs two positive numbers as WIDTHxHEIGHT in mm "
+                     f"(for example --fit-mm 120x120), got {value!r}\n")
+    sys.exit(2)
+
+
 def build_settings(flags, cfg):
     """Resolve CLI flags and YAML config into a Settings instance.
 
@@ -285,6 +307,9 @@ def build_settings(flags, cfg):
     satin_extend = flag("no-satin-extend", False) is not True
     satin_max_arg = flag("satin-max-mm", None)
     size_mm = float(flag("size-mm", "100"))
+    size_given = flag("size-mm", None) is not None
+    fit_arg = flag("fit-mm", None)
+    fit_mm = None if fit_arg is None else parse_fit_mm(fit_arg)
     row_spacing_mm = float(profile_value("density", ROW_SPACING_MM))
     satin_max_mm = SATIN_MAX_MM
 
@@ -408,6 +433,55 @@ def build_settings(flags, cfg):
     sat_min_coverage = float(_sat_cfg.get("min_coverage", 0.9))
     sat_max_overhang = float(_sat_cfg.get("max_overhang", 0.45))
 
+    # --- thin_lines: what to do with outline runs thinner than the satin gate -----
+    _thin = str(cfg.get("thin_lines", "widen")).strip().lower()
+    if _thin not in ("widen", "run"):
+        print(f"warning: ignoring thin_lines {_thin!r} (use widen or run)")
+        _thin = "widen"
+
+    # --- trim.min_mm: jumps up to this length are never cut (Ink/Stitch adds no
+    # lock stitches for gaps under its 3 mm collapse length) ----------------------
+    try:
+        _trim_min = float((cfg.get("trim") or {}).get("min_mm", TRIM_MIN_MM))
+    except (TypeError, ValueError):
+        print("warning: ignoring non-numeric trim.min_mm")
+        _trim_min = TRIM_MIN_MM
+
+    # --- outline_zigzag_spacing_mm: wider zigzag on outline satins = less thread ----
+    _ozz = cfg.get("outline_zigzag_spacing_mm")
+    try:
+        _ozz = float(_ozz) if _ozz is not None else None
+        if _ozz is not None and not 0.3 <= _ozz <= 0.8:
+            print(f"warning: ignoring outline_zigzag_spacing_mm {_ozz} (use 0.3 to 0.8)")
+            _ozz = None
+    except (TypeError, ValueError):
+        print("warning: ignoring non-numeric outline_zigzag_spacing_mm")
+        _ozz = None
+
+    # --- outline_order: how the outline segments are sequenced -------------------
+    _oo = str(cfg.get("outline_order", "centroid")).strip().lower()
+    if _oo not in ("centroid", "endpoint"):
+        print(f"warning: ignoring outline_order {_oo!r} (use centroid or endpoint)")
+        _oo = "centroid"
+
+    # --- gradients: regions stitched as one Ink/Stitch linear gradient fill -----
+    _gradients = []
+    _grad_cfg = cfg.get("gradients") or []
+    if not isinstance(_grad_cfg, list):
+        print(f"warning: ignoring non-list gradients {_grad_cfg!r}")
+        _grad_cfg = []
+    for _i, _g in enumerate(_grad_cfg):
+        _stops = [str(h).strip().lower() for h in ((_g or {}).get("stops") or [])] if isinstance(_g, dict) else []
+        if not 2 <= len(_stops) <= 4 or not all(re.fullmatch(r"#[0-9a-f]{6}", h) for h in _stops):
+            print(f"warning: ignoring gradient #{_i + 1}: needs 2 to 4 '#rrggbb' stops, light to dark")
+            continue
+        _gradients.append(dict(name=str(_g.get("name") or f"gradient{_i + 1}"), stops=_stops,
+                               min_area_mm2=float(_g.get("min_area_mm2", 20.0)),
+                               min_r2=float(_g.get("min_r2", 0.5)),
+                               # interleaved rows leave small gaps at 0.4 mm (measured:
+                               # 2.9 % uncovered on a flame lobe vs 0.05 % at 0.3 mm)
+                               row_spacing_mm=float(_g.get("row_spacing_mm", 0.3))))
+
     for _name, _val in [("global", row_spacing_mm)] + list(_density.items()):
         if not 0.3 <= _val <= 0.6:
             print(f"warning: density {_val} mm ({_name}) is outside the safe 0.3-0.6 mm range "
@@ -421,7 +495,8 @@ def build_settings(flags, cfg):
               f"border_zigzag_spacing_mm={border_zigzag}, fabric_color={fabric_color or 'unset'})")
 
     return Settings(
-        n_colors=n_colors, colors_given=colors_given, size_mm=size_mm, no_border=no_border, border_mm=border_mm,
+        n_colors=n_colors, colors_given=colors_given, size_mm=size_mm, size_given=size_given,
+        fit_mm=fit_mm, no_border=no_border, border_mm=border_mm,
         border_mode=_border_mode, trim=trim, trim_threshold_mm=trim_threshold_mm,
         row_spacing_mm=row_spacing_mm, no_satin=no_satin, satin_extend=satin_extend, fill_angle=fill_angle,
         angle_map=_angle, density_map=_density, satinize_colors=satinize_colors,
@@ -434,6 +509,8 @@ def build_settings(flags, cfg):
         fill_underlay_light_l=fill_underlay_light_l, satin_underlay=satin_underlay,
         satin_underlay_inset_mm=satin_underlay_inset_mm,
         border_zigzag_spacing_mm=border_zigzag, fabric_color=fabric_color,
+        gradients=_gradients, thin_lines=_thin, outline_order=_oo,
+        trim_min_mm=_trim_min, outline_zigzag_spacing_mm=_ozz,
     )
 
 
@@ -462,6 +539,36 @@ def load_image(path):
 
     return ImageData(H=H, W=W, arr=arr, transparent=transparent,
                      has_transparency=has_transparency, silhouette=silhouette, rgb=rgb)
+
+
+def resolve_px_per_mm(design_w, design_h, size_mm, size_given, fit_mm):
+    """Source pixels per mm for a design of ``design_w`` x ``design_h`` px.
+
+    ``--size-mm`` alone (or neither flag): the longest side is ``size_mm``.
+    ``--fit-mm`` alone: the design fills the box, whichever axis hits it first.
+    Both: the smaller design wins, i.e. the larger px/mm.
+    Returns ``(px_per_mm, rule, note)``; ``note`` is None unless both were given.
+    """
+    size_ppm = max(design_w, design_h) / size_mm
+    if fit_mm is None:
+        rule = f"--size-mm {size_mm:g}, longest side" if size_given else f"default {size_mm:g} mm longest side"
+        return size_ppm, rule, None
+    fw, fh = fit_mm
+    fit_ppm = max(design_w / fw, design_h / fh)
+    limit = "width" if design_w / fw >= design_h / fh else "height"
+    box = f"{fw:g}x{fh:g}"
+    if not size_given:
+        return fit_ppm, f"fills --fit-mm {box}, {limit} limits", None
+    if fit_ppm > size_ppm:
+        return fit_ppm, f"--fit-mm {box} limited it, {limit} limits", (
+            f"note: --fit-mm {box} limited the size; --size-mm {size_mm:g} alone would give a "
+            f"longest side of {max(design_w, design_h) / size_ppm:.1f} mm, larger than the box")
+    if size_ppm > fit_ppm:
+        return size_ppm, f"--size-mm {size_mm:g} limited it, longest side", (
+            f"note: --size-mm {size_mm:g} limited the size; --fit-mm {box} alone would allow a "
+            f"longest side of {max(design_w, design_h) / fit_ppm:.1f} mm")
+    return size_ppm, f"--size-mm {size_mm:g} and --fit-mm {box} give the same size", (
+        f"note: --size-mm {size_mm:g} and --fit-mm {box} give the same size")
 
 
 def design_scale(img, settings):
@@ -507,11 +614,15 @@ def design_scale(img, settings):
         else:
             design_w, design_h = W, H
 
-    px_per_mm = max(design_w, design_h) / settings.size_mm
+    px_per_mm, rule, note = resolve_px_per_mm(
+        design_w, design_h, settings.size_mm, settings.size_given, settings.fit_mm)
     scale = 1.0 / px_per_mm
+    print(f"design size: {design_w / px_per_mm:.1f} x {design_h / px_per_mm:.1f} mm ({rule})")
+    if note:
+        print(note)
     if px_per_mm < 3.0:
         print(f"warning: source is too coarse to stitch well ({1 / px_per_mm:.2f} mm per source pixel at "
-              f"{settings.size_mm:.0f} mm; need >= 3 px/mm). Supply a larger source image.")
+              f"{max(design_w, design_h) / px_per_mm:.0f} mm; need >= 3 px/mm). Supply a larger source image.")
     Wmm = W * scale
     Hmm = H * scale
 
@@ -694,6 +805,7 @@ def detect_border(img, scale, settings):
     n_tiny_parts = 0
     n_thin_parts = 0
     n_runout = 0       # parts given a running-stitch outline
+    runout_seen = set()   # silhouette components whose outline is already emitted
     for i in range(1, n_parts + 1):
         part = (parts == i)
         cnts = measure.find_contours(np.pad(part, 1), 0.5)
@@ -726,6 +838,13 @@ def detect_border(img, scale, settings):
             if sil_lab is None:
                 sil_lab, _ = ndimage.label(img.silhouette)
             comp = _original_part(sil_lab, part)
+            # several thin parts of one silhouette component all trace that
+            # component's whole outline: emit it once, or the same line is
+            # stitched (and bean-stitched) twice over the border
+            comp_key = (int(comp.sum()), int(comp.argmax()))
+            if comp_key in runout_seen:
+                continue
+            runout_seen.add(comp_key)
             ocnts = measure.find_contours(np.pad(comp, 1), 0.5)
             if ocnts:
                 opoly = measure.approximate_polygon(max(ocnts, key=_poly_area) - 1,
@@ -1104,27 +1223,49 @@ def outline_satins(img, scale, masks, palette, lw, settings):
         return outline_items, lw_cover
 
     lw_mask = masks[lw]
+    thin_run = settings.thin_lines == "run"
     segs = satin_segments(lw_mask, scale.px_per_mm, settings.satin_min_len_mm,
                           settings.satin_min_mm, settings.satin_max_mm, scale.tolerance,
-                          extend_ends=settings.satin_extend)
+                          extend_ends=settings.satin_extend, raw_widths=thin_run)
+    runs = []
+    if thin_run:
+        # runs thinner than the satin gate stitch as a bean-stitch line along the
+        # centre line instead of a satin widened to satin_min_mm
+        gate_px = settings.satin_gate_mm * scale.px_per_mm
+        runs = [(d, poly, w_raw) for d, poly, w, w_raw in segs if w_raw < gate_px]
+        segs = [(d, poly, w) for d, poly, w, w_raw in segs if w_raw >= gate_px]
     # A satin shorter than it is wide is not stitchable: its rails are shorter
     # than the zigzag travel, and Ink/Stitch then builds a section with no
     # points and dies with "tuple index out of range" in flattened_sections.
     # Polygonal simplification can shorten a run below the SATIN_MIN_LEN_MM
     # gate, so re-test on the emitted polyline.
+    # A short run that closes on itself (its ends closer than half its width)
+    # is the outline of a blob smaller than the satin is wide: the two offset
+    # rails cross and Ink/Stitch dies in the same place.
     _segs = []
+    n_loops = 0
     for d, poly, w in segs:
-        _len = float(np.hypot(*np.diff(poly, axis=0).T).sum()) / scale.px_per_mm
-        if _len < max(2.5, 1.5 * w / scale.px_per_mm):
+        _px = float(np.hypot(*np.diff(poly, axis=0).T).sum())
+        if _px / scale.px_per_mm < max(2.5, 1.5 * w / scale.px_per_mm):
+            continue
+        if _px < 10.0 * w and float(np.hypot(*(poly[0] - poly[-1]))) < 0.5 * w:
+            n_loops += 1
             continue
         _segs.append((d, poly, w))
     if len(_segs) != len(segs):
         print(f"note: dropped {len(segs) - len(_segs)} outline satin(s) shorter than "
-              f"their own width ({len(segs)} -> {len(_segs)})")
+              f"their own width or closed on themselves ({len(segs)} -> {len(_segs)}"
+              + (f", {n_loops} loop(s)" if n_loops else "") + ")")
     segs = _segs
-    if segs:
+    if segs or runs:
         cover_img = Image.new("L", (W, H), 0)
         cover_draw = ImageDraw.Draw(cover_img)
+        for d, poly, w_raw in runs:
+            outline_items.append(dict(cent=(float(poly[:, 0].mean()), float(poly[:, 1].mean())),
+                                      pts=poly, d=d, satin=False, stroke=True, lab_id=None,
+                                      rgb=palette.centroids[lw], spacing=None, width_px=w_raw))
+            cover_draw.line([(float(x), float(y)) for y, x in poly], fill=255,
+                            width=max(1, int(round(w_raw))), joint="curve")
         for d, poly, w in segs:
             outline_items.append(dict(cent=(float(poly[:, 0].mean()), float(poly[:, 1].mean())),
                                       pts=poly, d=d, satin=True, lab_id=None,
@@ -1135,8 +1276,58 @@ def outline_satins(img, scale, masks, palette, lw, settings):
         # band-edge mismatch with the simplified skeleton leaves sub-mm slivers
         lw_cover = ndimage.binary_dilation((np.array(cover_img) > 0) & lw_mask,
                                            structure=morphology.disk(2))
-        print(f"satin outlines: {len(outline_items)} segments from {_rgb_str(palette.centroids[lw])}")
+        _extra = f" + {len(runs)} thin running lines" if runs else ""
+        print(f"satin outlines: {len(outline_items) - len(runs)} segments{_extra} from {_rgb_str(palette.centroids[lw])}")
     return outline_items, lw_cover
+
+
+def gradient_regions(img, scale, palette, masks, fill_colors, lw, settings):
+    """Find the regions to stitch as one linear gradient (config ``gradients:``).
+
+    A region is a connected component of the union of a gradient's stop colours
+    whose original pixels follow a straight colour ramp (gradient.fit_region).
+    Its pixels are removed from the flat masks so no flat fill stitches under it.
+    A region that does not fit stays flat. Returns dicts: mask, stops (palette
+    indices in offset order), fit, name.
+    """
+    out = []
+    for g in settings.gradients:
+        try:
+            stops = gradfit.resolve_stops(g["stops"], palette.centroids)
+        except ValueError as e:
+            print(f"gradient {g['name']}: skipped, {e}")
+            continue
+        if any(c not in masks or c == lw for c in stops):
+            print(f"gradient {g['name']}: skipped, a stop colour is skipped or is the outline colour")
+            continue
+        union = np.zeros_like(masks[stops[0]])
+        base = np.zeros_like(union)
+        for c in stops:
+            union |= masks[c]
+            base |= (palette.label_all == c) & img.silhouette
+        stops_lab = gradfit.rgb_to_lab(palette.centroids[stops])
+        min_px = max(1, int(g["min_area_mm2"] * scale.px_per_mm ** 2))
+        for comp in gradfit.regions(union, min_px):
+            fitpix = comp & base
+            n_fit = int(fitpix.sum())
+            share = [int(((palette.label_all == c) & fitpix).sum()) / max(1, n_fit) for c in stops]
+            area = float(comp.sum()) / scale.px_per_mm ** 2
+            if sum(1 for f in share if f >= 0.08) < 2:
+                print(f"gradient {g['name']}: region {area:.0f} mm2 stays flat (under two stop colours)")
+                continue
+            ys, xs = np.nonzero(fitpix)
+            fit = gradfit.fit_region(gradfit.rgb_to_lab(img.rgb[ys, xs]),
+                                     np.column_stack([xs, ys]), stops_lab, min_r2=g["min_r2"])
+            if fit is None:
+                print(f"gradient {g['name']}: region {area:.0f} mm2 stays flat (no straight colour ramp)")
+                continue
+            out.append(dict(mask=comp, stops=stops, fit=fit, name=g["name"],
+                            spacing=g["row_spacing_mm"]))
+            for c in stops:
+                masks[c] = masks[c] & ~comp
+            print(f"gradient {g['name']}: region {area:.0f} mm2, ramp at {fit['angle_deg']:.0f} deg, "
+                  f"R2 {fit['r2']:.2f}, stops {[_rgb_str(palette.centroids[c]) for c in stops]}")
+    return out
 
 
 def fill_components(img, scale, border, palette, masks, fill_colors, lw, lw_cover, settings):
@@ -1147,6 +1338,7 @@ def fill_components(img, scale, border, palette, masks, fill_colors, lw, lw_cove
     color_keep_lab = {}
     satinized_satins = []      # (cluster, d, pts, width_px)
     satinized_polys = []       # px-space shapely geoms removed from their fill
+    grad_regions = gradient_regions(img, scale, palette, masks, fill_colors, lw, settings)
     print("fills:")
     for c in fill_colors:
         mask = masks[c]
@@ -1191,6 +1383,24 @@ def fill_components(img, scale, border, palette, masks, fill_colors, lw, lw_cove
         _sat_note = f", {n_sat} -> satin" if n_sat else ""
         print(f"  {_rgb_str(palette.centroids[c])}: {len(items)} comps (dropped {dropped}){_sat_note}")
 
+    # Gradient regions join the layer of their first stop colour in stitch order.
+    for gr in grad_regions:
+        c0 = next(c for c in fill_colors if c in gr["stops"])
+        g_paths, g_cents, g_pts, g_keep, _drop, _geoms = contour_paths(
+            gr["mask"], scale.min_comp_px, scale.min_hole_px, scale.tolerance)
+        kl = color_keep_lab[c0]
+        base_id = int(kl.max())
+        hx0 = hexkey(palette.centroids[c0]).lower()
+        for i in range(len(g_paths)):
+            kl[g_keep == i + 1] = base_id + i + 1
+            color_items[c0].append(dict(
+                cent=g_cents[i], pts=g_pts[i], d=g_paths[i], satin=False,
+                lab_id=base_id + i + 1, rgb=palette.centroids[c0],
+                spacing=gr["spacing"], width_px=None, angle=None,
+                gradient=dict(
+                    stops=[tuple(int(v) for v in palette.centroids[c]) for c in gr["stops"]],
+                    offsets=gr["fit"]["offsets"], p1=gr["fit"]["p1"], p2=gr["fit"]["p2"])))
+
     if satinized_satins:
         # each fill component is its own object, so dropping the item removes the
         # fill entirely -- the satin replaces it, with no fill sliver left behind
@@ -1213,6 +1423,38 @@ def nn_sort(items, needle):
         nxt = remaining.pop(i)
         out.append(nxt)
         cur = np.asarray(nxt["cent"], dtype=float)
+    return out
+
+
+def nn_sort_ends(items, needle):
+    """Nearest-neighbour order of path items by ENDPOINT, reversing a path when its far end is nearer.
+
+    Outline segments meet at junctions, so the next segment usually starts where the
+    previous one ended: no jump, no trim. Each item gets ``ends`` = (start, end) in
+    path order, which plan_trims uses as the exact jump instead of its geometric guess.
+    """
+    remaining = list(items)
+    out = []
+    cur = np.asarray(needle, dtype=float)
+    while remaining:
+        best = None
+        for k, o in enumerate(remaining):
+            pts = np.asarray(o["pts"], dtype=float)
+            da = float(np.hypot(*(pts[0] - cur)))
+            db = float(np.hypot(*(pts[-1] - cur)))
+            cand = (da, k, False) if da <= db else (db, k, True)
+            if best is None or cand[0] < best[0]:
+                best = cand
+        _, k, rev = best
+        o = remaining.pop(k)
+        pts = np.asarray(o["pts"], dtype=float)
+        if rev:
+            pts = pts[::-1]
+            o["pts"] = pts
+            o["d"] = "M " + " L ".join(f"{x:.1f},{y:.1f}" for y, x in pts)
+        o["ends"] = (pts[0], pts[-1])
+        out.append(o)
+        cur = pts[-1]
     return out
 
 
@@ -1261,7 +1503,8 @@ def order_objects(img, scale, palette, fill_colors, color_items, color_keep_lab,
     if outline_items:
         satin_img = Image.new("I", (W, H), -1)
         satin_draw = ImageDraw.Draw(satin_img)
-        for o in nn_sort(outline_items, needle):
+        _outline_sort = nn_sort_ends if settings.outline_order == "endpoint" else nn_sort
+        for o in _outline_sort(outline_items, needle):
             o["group_id"] = "outlines"
             o["group_label"] = "Outline"
             o["index"] = len(objs)
@@ -1361,6 +1604,10 @@ def plan_trims(img, scale, objs, stitch_index, settings):
     if settings.trim:
         for i in range(len(objs) - 1):
             d_min, d_max, p0, p1 = gap_and_segment(objs[i], objs[i + 1], scale.px_per_mm)
+            _ea, _eb = objs[i].get("ends"), objs[i + 1].get("ends")
+            if (_ea is not None and _eb is not None
+                    and float(np.hypot(*(_ea[1] - _eb[0]))) / scale.px_per_mm <= settings.trim_min_mm):
+                continue        # the next path starts where this one ended: no jump to cut
             if settings.trim_threshold_mm == 0:
                 short = d_min <= settings.trim_min_mm
             else:
@@ -1382,8 +1629,11 @@ def plan_trims(img, scale, objs, stitch_index, settings):
     return trim_after, n_trims
 
 
-def el(id_, fill_rgb, d, settings, spacing=None, trim_after=False, angle=None):
+def el(id_, fill_rgb, d, settings, spacing=None, trim_after=False, angle=None,
+       gradient_id=None):
     hx = "#%02x%02x%02x" % tuple(int(v) for v in fill_rgb)
+    fill_css = f"url(#{gradient_id})" if gradient_id else hx
+    method = 'inkstitch:fill_method="linear_gradient_fill" ' if gradient_id else ""
     rs = spacing if spacing is not None else settings.row_spacing_mm
     trim = 'inkstitch:trim_after="true" ' if trim_after else ""
     ang = f'inkstitch:angle="{angle:g}" ' if angle is not None else ""
@@ -1400,8 +1650,8 @@ def el(id_, fill_rgb, d, settings, spacing=None, trim_after=False, angle=None):
     # Pin the params the legacy version-0 update used to inject, so a version-4
     # file stitches the same tatami rows: 3 mm max stitch (samples sew 3.0 mm)
     # and 1.5 mm travel between fill rows.
-    return (f'<path id="{id_}" style="fill:{hx};stroke:none" fill-rule="evenodd" '
-            f'inkstitch:row_spacing_mm="{rs}" {ang}'
+    return (f'<path id="{id_}" style="fill:{fill_css};stroke:none" fill-rule="evenodd" '
+            f'{method}inkstitch:row_spacing_mm="{rs}" {ang}'
             f'inkstitch:max_stitch_length_mm="3" inkstitch:running_stitch_length_mm="1.5" '
             f'{underlay}{trim}d="{d}"/>')
 
@@ -1471,6 +1721,18 @@ def emit_svg(out, objs, trim_after, img, scale, settings):
         '<inkstitch:collapse_len_mm>3</inkstitch:collapse_len_mm>'
         '</metadata>\n'
     )
+    grads = [(i, o["gradient"]) for i, o in enumerate(objs) if o.get("gradient")]
+    if grads:
+        p.append("  <defs>\n")
+        for i, gr in grads:
+            p.append(f'    <linearGradient id="g{i}" gradientUnits="userSpaceOnUse" '
+                     f'x1="{gr["p1"][0]:.2f}" y1="{gr["p1"][1]:.2f}" '
+                     f'x2="{gr["p2"][0]:.2f}" y2="{gr["p2"][1]:.2f}">\n')
+            for off, rgb in zip(gr["offsets"], gr["stops"]):
+                p.append(f'      <stop offset="{off:.4f}" style="stop-color:'
+                         f'#{int(rgb[0]):02x}{int(rgb[1]):02x}{int(rgb[2]):02x};stop-opacity:1"/>\n')
+            p.append("    </linearGradient>\n")
+        p.append("  </defs>\n")
     idx = 0
     current_group = None
     for o, tm in zip(objs, trim_after):
@@ -1483,7 +1745,8 @@ def emit_svg(out, objs, trim_after, img, scale, settings):
         if o["satin"]:
             gid = o["group_id"]
             underlay = settings.satin_underlay and gid in ("outlines", "border")
-            zigzag = settings.border_zigzag_spacing_mm if gid == "border" else None
+            zigzag = (settings.border_zigzag_spacing_mm if gid == "border"
+                      else settings.outline_zigzag_spacing_mm if gid == "outlines" else None)
             p.append("    " + satin_el(f"s{idx}", o["rgb"], o["d"], o["width_px"],
                                        scale, settings, trim_after=tm,
                                        underlay=underlay, zigzag_mm=zigzag,
@@ -1492,7 +1755,8 @@ def emit_svg(out, objs, trim_after, img, scale, settings):
             p.append("    " + run_el(f"r{idx}", o["rgb"], o["d"], trim_after=tm) + "\n")
         else:
             p.append("    " + el(f"f{idx}", o["rgb"], o["d"], settings, spacing=o["spacing"],
-                                  trim_after=tm, angle=o.get("angle")) + "\n")
+                                  trim_after=tm, angle=o.get("angle"),
+                                  gradient_id=f"g{idx}" if o.get("gradient") else None) + "\n")
         idx += 1
     if current_group is not None:
         p.append('  </g>\n')

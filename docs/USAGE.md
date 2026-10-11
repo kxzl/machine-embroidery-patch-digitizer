@@ -82,6 +82,7 @@ put on `PYTHONPATH` automatically by `run.sh` for the Ink/Stitch export step.
 | `--profile NAME` | none | Select a named fabric profile (`vadmel`). Sets density, underlap, raster pull and underlay unless each is overridden by an explicit CLI flag or YAML key. See **Fabric profiles**. |
 | `--no-skip-last` | off | Fill underlay stitches every row instead of skipping the last one (drops `inkstitch:fill_underlay_skip_last`). YAML `fill_underlay_skip_last: false` / `no_skip_last: true` are equivalent; the vadmel profile sets it. |
 | `--size-mm N` | `100` | Longest side of the finished design (mm). Scales the design's own bounds (alpha silhouette for transparent art, non-background bbox for opaque art), not the image canvas. |
+| `--fit-mm WxH` | off | Fit box in mm, for example `--fit-mm 120x120` (`x` or `X`; two positive numbers, otherwise exit code 2). Scales the design to fill the box on the side that reaches it first. It is never rotated. Like `--size-mm` it measures the design's own bounds, not the stitched result: the stitching runs about 0.4 mm over the box (satin pull compensation), and up to about 3 mm over when the artwork touches the image edge (the border is then centred on the edge). Pad such images with transparent pixels. With `--size-mm` as well, the smaller result wins and a note names the flag that limited the size. With neither flag the default 100 mm longest side applies. |
 | `--overlap-mm N` | `1.0` | SVG inputs: a later colour may overlap an earlier one by at most this much — under-colours are carved out from beneath later colours (a later colour can still cover an earlier one by up to `2 x N` where the later shape is thin). After the carve, fragments fully hidden under a later colour are dropped entirely (they were bare stubs that each cost underlay + tie stitches). `0` disables the carve. |
 | `--seam-pull-mm MM` | `0.2` | SVG inputs: thread is laid *centred* on its path, so a fill's **stitched** edge finishes half a thread width outside the drawn edge and eats the earlier colour's detail there (measured on the Scavenger's Daughter artwork: 19 % of the visible green). Pull every later colour back by this much along the colour edges so its stitched edge lands on the drawn edge. Only where a later colour abuts an earlier one — the outer silhouette and white highlights are untouched. `0` disables it. |
 | `--fill-angle DEG` | authored | SVG inputs: force this fill angle on every fill. Overrides the artist's per-path `inkstitch:angle`. |
@@ -356,3 +357,136 @@ border satin.
   it's a CPU-bound, single-threaded conversion.
 - Machine format is **VP3** by default. Ink/Stitch can output `.dst`, `.pes`,
   `.jef`, etc. — change `--format-vp3=True` in `tools/digitize/run.sh`.
+
+---
+
+## Gradients, thin lines and keying
+
+### Gradients (`gradients:` YAML)
+
+`gradients:` is a YAML key in the config file passed with `--config`. It is a
+list, and each entry describes one gradient:
+
+- `name`: a label for the entry.
+- `stops`: 2 to 4 hex colours, light to dark. Each stop must be close to a
+  palette colour (within 30 delta E) and all stops must differ.
+- `min_area_mm2`: default 20. Smaller regions stay flat.
+- `min_r2`: default 0.5. The straight-line fit must reach this value.
+- `row_spacing_mm`: default 0.3.
+
+A region is a connected area of the stop colours whose original pixels follow one
+straight colour ramp. A matching region is written as an Ink/Stitch linear
+gradient fill: rows of neighbouring colours interleaved. Regions that do not fit
+stay flat.
+
+Each gradient region adds one colour block per stop, so each region costs extra
+colour changes. Pin the palette (the `palette:` key) so the stops stay distinct.
+Without the key the output is unchanged.
+
+```yaml
+gradients:
+  - name: flame
+    stops: ['#f2b33d', '#e8590c', '#8c1c13']
+    min_area_mm2: 60
+```
+
+### Thin lines (`thin_lines:` YAML)
+
+`thin_lines: widen|run`, default `widen`.
+
+- `widen`: outline runs thinner than 1.2 mm are widened to a 1.2 mm satin. This
+  is the old behaviour.
+- `run`: outline runs whose measured width is under 1.0 mm (the satin gate) are
+  stitched as a bean-stitch running line along the centre line instead. Wider
+  runs stay satin.
+
+Use `run` for detailed AI-made art with hairline outlines: the widened satins
+pile up where lines meet.
+
+### Keep enclosed background (`--keep-enclosed`)
+
+`--keep-enclosed` is a `run.sh` flag and is used together with
+`--key-background`. Background keying removes every pixel near the background
+colour. A pale colour enclosed by the artwork (an off-white symbol on a black
+disc, on a white margin) can be keyed out in part. With `--keep-enclosed` only
+background connected to the image edge becomes transparent.
+
+The flag is off by default, because it changes results for designs with pale
+interiors (Book Burner, Goat).
+
+### Jam check
+
+`run.sh` prints `== jam check` after each export. The check lives in
+`tools/digitize/qa/jam_check.py` and is also usable alone:
+
+```bash
+.venv/bin/python tools/digitize/qa/jam_check.py <file.vp3> \
+  [--max-points-15 N] [--max-thread-cell-mm X] \
+  [--trim-cluster-n N] [--trim-cluster-mm X] [--strict]
+```
+
+It reports:
+
+- Needle packing: needle points within 1.5 mm. It warns above 140.
+- Thread per 1 mm cell: it warns above 20 mm. A healthy satin is about 10 to
+  12 mm.
+- Trim clusters: 4 or more cuts within 6 mm.
+
+Each warning lists up to 5 spots in mm from the top-left of the design. Many
+trims and many colour changes make the machine stop often.
+
+### Satin precheck
+
+Some outline satins have a rail geometry Ink/Stitch cannot build (a short hook or loop
+narrower than the satin). The export then dies with `IndexError: tuple index out of
+range` in `flattened_sections` and names no element. `run.sh` now runs
+`tools/digitize/qa/satin_precheck.py` before the export: it builds each satin column on
+its own, prints `bad satin: ID` for the ones that raise and removes them from the SVG.
+Closed outline loops shorter than 10 satin widths are dropped earlier, in `vectorize.py`
+(the note says "closed on themselves"). Used alone:
+
+```bash
+PYTHONPATH=tools/wxstub INKSTITCH_OFFLINE_SCRIPT=true \
+  .venv/bin/python tools/digitize/qa/satin_precheck.py design.svg [--fix design.svg]
+```
+
+### Recipe for a machine that jams
+
+```yaml
+thin_lines: run
+outline_order: endpoint
+underlap_mm: 0.3
+trim:
+  threshold_mm: 12
+  min_mm: 3
+```
+
+```bash
+tools/digitize/run.sh --key-background --keep-enclosed --no-satin-extend --config work/jam.yaml image.webp
+```
+
+- `thin_lines: run` stitches hairline outlines as running lines instead of
+  widening them to satin, so satins do not pile up where lines meet.
+- `outline_order: endpoint` stitches the outline segments in endpoint order and
+  reverses a segment when its far end is nearer, so segments that meet at a
+  junction follow each other with no jump and no cut. Default `centroid`.
+- `trim: min_mm: 3` never cuts a jump of 3 mm or less (Ink/Stitch adds no lock
+  stitches below its 3 mm collapse length). Default 2.
+- `outline_zigzag_spacing_mm: 0.5` (0.3 to 0.8) sets the zigzag spacing of the outline
+  satins; wider means less thread per mm of line. Default: Ink/Stitch's 0.4.
+- For bold black lines keep `thin_lines: widen` (the default) and use the rest of this
+  recipe: the pile-ups come from the number of cuts and from junctions, not from the
+  line width. Use `thin_lines: run` only when you want hairlines kept thin.
+- `underlap_mm: 0.3` lowers the underlap so each fill overlaps its neighbours by
+  less.
+- `trim: threshold_mm: 12` raises the trim threshold to 12 mm, so the machine
+  cuts fewer times.
+- `--no-satin-extend` keeps satin outline ends square so they cannot pile up at
+  junctions.
+- `--keep-enclosed` keeps pale interior colours from being keyed out. Use it
+  when the art has off-white parts.
+- `border: thickness_mm: 1.8` (default 2.5) when the jam check shows a thread-per-cell spike
+  far above the others on the border: the 2.5 mm satin folds at a hairpin between two thin
+  parts (a spider's leg tips gave 61.8 mm, 25.8 mm at 1.8).
+- `skip_colors: ['#101010']` leaves a colour unstitched, for a patch cut from fabric of that
+  colour (the goat's black disc on black twill: 18,488 stitches become 10,038).

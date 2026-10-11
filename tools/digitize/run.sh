@@ -23,6 +23,7 @@ FLAGS=()
 IMG=""
 NO_EXPORT=0
 KEY_BG=0
+KEEP_ENCLOSED=""
 BACKGROUND=""
 CONFIG=""
 while [[ $# -gt 0 ]]; do
@@ -39,6 +40,7 @@ while [[ $# -gt 0 ]]; do
     --underlap-mm|--raster-pull-mm|--profile)
       FLAGS+=("$a" "$1"); shift ;;
     --key-background) KEY_BG=1 ;;
+    --keep-enclosed) KEEP_ENCLOSED="--keep-enclosed" ;;
     --no-export) NO_EXPORT=1 ;;
     -*) FLAGS+=("$a") ;;
     *) IMG="$a" ;;
@@ -120,7 +122,7 @@ if [[ "$KEY_BG" == "1" ]]; then
     echo "note: --key-background applies to raster inputs only; ignoring for $IMG"
   else
     KEYED="work/${BASE}_keyed.png"
-    .venv/bin/python tools/digitize/key_background.py "$IMG" "$KEYED"
+    .venv/bin/python tools/digitize/key_background.py "$IMG" "$KEYED" $KEEP_ENCLOSED
     IMG="$KEYED"
   fi
 fi
@@ -133,6 +135,10 @@ if [[ "$NO_EXPORT" == "1" ]]; then
   echo "== done: $OUT_SVG"
   exit 0
 fi
+
+echo "== satin precheck"
+PYTHONPATH=tools/wxstub INKSTITCH_OFFLINE_SCRIPT=true \
+  .venv/bin/python tools/digitize/qa/satin_precheck.py "$OUT_SVG" --fix "$OUT_SVG" || true
 
 echo "== exporting VP3"
 PYTHONPATH=tools/wxstub INKSTITCH_OFFLINE_SCRIPT=true \
@@ -169,5 +175,8 @@ echo "== stitch plan"
   "output_vp3/${BASE}_stitchplan.png" --width 1600 --line-width 1 "${PREVIEW_BG[@]}"
 .venv/bin/python tools/digitize/preview.py "output_vp3/$BASE.vp3" \
   "output_vp3/${BASE}_coverage.png" --width 1600 --thread-mm 0.5 "${PREVIEW_BG[@]}"
+
+echo "== jam check"
+.venv/bin/python tools/digitize/qa/jam_check.py "output_vp3/$BASE.vp3" || true
 
 echo "== done: $OUT_SVG and output_vp3/$BASE.vp3"
