@@ -88,6 +88,19 @@ Status: CONFIRMED by the operator on 2026-10-10. Progress:
   cluster 28 to 7 cuts, peak needle packing 157 to 122 points (inside the 140 limit),
   colour changes 13 to 10 with all flame regions as gradients. Thread per cell peaks
   at 21.5 mm (limit 20), still borderline. NOT sewn yet.
+- Remaining patches, round 1 (2026-10-10, web UI, results in section 13 below). Eight
+  patches now have a pipeline output at lore size. Earth, Spider, Clover, Epicure, Book
+  Burner and Bomb were generated, measured and digitized in this round; Skyfowl was redrawn
+  simpler for 75 mm. Not sewn.
+- Pipeline fixes found on the way, all local, unpushed, default output byte-identical on
+  the 3 `regress.sh` designs for the vectorize changes (the `run.sh` precheck hook is not
+  exercised by `regress.sh`; `satin_precheck.py` reported 0 bad satins on the three baseline
+  SVGs, 54, 56 and 14 satins): (1) closed outline loops narrower than the satin are dropped
+  (they crashed the Ink/Stitch export, af5f9af); (2) `tools/digitize/qa/satin_precheck.py`
+  builds every satin column alone and removes the ones that crash the export, run by
+  `run.sh` before the export; (3) a silhouette component's thin-part running outline was
+  emitted once per thin part (the whole outline stitched twice): now once. This one has no
+  unit test and was verified only on the spider (stitches 14,503 to 13,360).
 - G4, G5: not started. 5 web generations logged in `input/nano_banana/web_log.md`.
 
 Implementation, subagents and later sessions work from this file, not from memory of
@@ -153,7 +166,7 @@ typed into code. Environment-specific values go in configuration.
 
 | Item | Value | Status |
 |---|---|---|
-| Maximum patch size | 120 x 120 mm (operator, 2026-10-10: "bigger patches are acceptable"). Sizes in section 3 are defaults, not ceilings. A larger size widens every line by size/old size, so it helps the detail limit (Skyfowl image 2: keyline median 0.64 mm at 75 mm would be about 1.02 mm at 120 mm). Thread budget for 101 to 120 mm: 8 (not yet decided by the operator). | operator confirmed the ceiling; effect on sizes per patch still open |
+| Patch size limits | Lore sizes apply (operator, 2026-10-10: Skyfowl at 120 x 120 mm "is like twice the size of original, should be smaller. We have to respect lore patch sizes to some extent"). This replaces the earlier "bigger patches are acceptable, up to 120 x 120". Sizes in section 3 are the targets. How far a size may drift above the table is undefined ("to some extent"); ask before going more than a few mm over. Do not enlarge a patch to fit a too-detailed image: simplify the artwork or change pipeline settings. Thread budget 8 for 80 to 100 mm. | operator, 2026-10-10 |
 | Hoop (fit box) | 260 x 200 mm | read from `HANDOFF.md:133` |
 | Machine file format | VP3 (Husqvarna/Viking) | read from `docs/USAGE.md:5` |
 | Needle count | single-needle, so each thread is a manual swap | ASSUMPTION, not verified |
@@ -308,3 +321,52 @@ Single-needle machine; $0.134 per image; 2 mm minimum spot is a safety margin, n
 measured limit; 2% cleanup threshold is uncalibrated; Book Burner is square;
 Earth's 60 mm size is inferred from the earlier digitized `earth.vp3` (60.5 x 60.4
 mm); canon anchors are only partly re-verified; the model ID is unconfirmed until G0.
+
+## 13. Round 1 results for the remaining patches (2026-10-10, web UI, not sewn)
+
+All numbers come from `tools/digitize/qa/jam_check.py` (limits: packing 140 points per
+1.5 mm, thread 20 mm per 1 mm cell, trim cluster WARN at 4 cuts). Thread per cell is
+uncalibrated and warns on most designs. Nothing here has been sewn. Files are in
+`output_vp3/` (previews `_coverage.png`, `_stitchplan.png` beside them), configs in
+`patch_descriptions/`, images in `input/nano_banana/web/`. Run each as
+`tools/digitize/run.sh --key-background --keep-enclosed --colors N --size-mm S --no-satin-extend --config CFG IMAGE`.
+
+| Patch | Image (gens) | VP3, size, stitches | Threads | Jam A / B / C | Deviation from the prompt |
+|---|---|---|---|---|---|
+| Skyfowl 75 mm | `skyfowl_web_3.jpg` (1, redrawn simpler) | `skyfowl_web_3_75.vp3` (gradient rows 0.5 mm), 75.5 x 75.4, 21,688; `skyfowl_web_3_75_r03.vp3` (rows 0.3 mm), 22,704 | 7 + gradient swaps, 9 colour changes | rows 0.5: 139 at the limit / 28.0 WARN / 9 WARN, visible gaps in the flame at 0.35 mm thread; rows 0.3: 159 WARN / 28.4 WARN / 9 WARN, flame fully covered | LORE: three arrowheads drawn, canon says a dozen (verified), prompt asks five; fewer feather plates |
+| Earth 60 mm | `earth_web_4.jpg` (4) | `earth_web_4_thin_60.vp3`, 60.4 x 60.3, 14,336 | 7, 7 colour changes | 157 WARN / 25.8 WARN / 8 WARN | smoke plume REMOVED (the prompt and spec name it; fan flavour, unverified in canon), atmosphere ring flat, extra black outer ring; `earth_web.yaml` is `thin_lines: run` (the operator rejected thin black lines on Skyfowl, so this needs a look); `earth_web_widen.yaml` rebuilds `earth_web_4_pad_60.vp3` (widen, 15,235 stitches, 161 / 27.4) |
+| Spider 70 mm | `spider_web_1.jpg` (1) | `spider_web_1.vp3`, 70 x 64, 12,924 | 7, 6 colour changes | 107 OK / 25.8 WARN / 12 WARN | lantern gradient dropped (amber and orange merged into one orange), four greys, legs read as black masses, eyes and fangs mostly lost |
+| Clover 75 mm | `clover_web_3.jpg` (3) | `clover_web_3.vp3`, 75.4 x 75.2, 19,047 | 7, 6 colour changes | 106 OK / 21.4 WARN / 7 WARN | burst gradient did not fit, the pale half of the burst merges into the cream field; first two images drew a hand, the prompt now says "foot in side profile" |
+| Epicure 80 mm (size is horn to horn, the disc is about 70 mm) | `epicure_web_1.jpg` (1) | `epicure_web_1_fabric.vp3`, 76.8 x 81.8, 10,038 (black disc left as fabric via `skip_colors`); `epicure_web_1_full.vp3`, 18,488 with the disc stitched | 4 | fabric 78 OK / 26.9 WARN (only for black fabric; the preview is on white, re-render with `--background '#111111'` before judging the charcoal); full 111 OK / 27.5 WARN | horns and beard break out of the disc, so the shape is not a circle; 4 threads, not 5 |
+| Book Burner 100 mm | `bookburner_web_1.jpg` (1) | `bookburner_web_1.vp3`, 100.3 x 98.4, 32,715 | 8, 9 colour changes | 134 OK / 21.5 WARN / 10 WARN | none of note; flame gradient fitted (R2 0.77) |
+| Peace 60 mm | `peace_web_3.jpg` (earlier) | `peace_web_3.vp3`, 8.2k stitches | 2 | not re-measured here | unchanged |
+| Bomb 90 mm | `bomb_web_2.jpg` (2) | `bomb_web_2.vp3`, 90.0 x 89.8, 12,405 | 6, 5 colour changes | 57 OK / 16.7 OK / 5 WARN | none; iron band and four rivets now present; die-cut sprite, sew on a white fabric square (`--no-border --no-satin-outlines`) |
+
+Scavenger's Daughter stays on the artist's art. Superseded outputs sit beside the finals in
+`output_vp3/` (Earth at 90 mm, Skyfowl at 75 and 85 mm on the old art, `skyfowl_web_2_120_*`);
+use only the files named in the table.
+
+Sewing order suggestion, anchored on the one real failure (Skyfowl stitch-out: packing 157,
+thread 37 mm per cell, 469 trims): Bomb first (green on packing and thread per cell, a
+calibration sew), then Clover and Book Burner (packing OK, thread 21 mm), then Epicure on
+black fabric. Earth (157) and Skyfowl (139 with gaps, 159 without) are at the failure level
+and should not be sewn before the hot spots are reviewed. Spider has the worst trim cluster (12
+cuts in 6 mm) and machine stops were part of the earlier failure.
+
+Findings that are not in the table:
+- Skyfowl is the patch the operator asked about. At 120 mm (rejected as too big) the bold
+  build had packing 121, thread 24.3, 181 trims. At 75 mm the old art gave packing 186
+  (OK only at 120 mm), so the art was redrawn simpler; at 75 mm the new art needs the
+  gradient `row_spacing_mm: 0.5` to reach 139. The peak sits where the black arrowheads
+  meet the flame gradient region. Using palette colours that match the image (dark brown
+  #3e2c1d, not #5c3a1e) keeps the feathers readable but raised packing from 133 to 159
+  before the row spacing change. Operator decides whether 139 is safe.
+- Gemini does not shrink artwork or thicken lines when asked (measured on Earth and
+  Skyfowl); pad the image afterwards (8 percent white margin) and use follow-ups only for
+  content. Edits in the same chat change little; a new chat with a rewritten prompt works
+  better (Clover).
+- Spider border: the default 2.5 mm satin border folds at a hairpin between two leg
+  tips (61.8 mm of thread in one 1 mm cell, 3 times the limit); `border.thickness_mm: 1.8`
+  brings it to 25.8 mm. Other designs may need the same.
+- Earth and Spider keep warnings; the hot spots are listed by `jam_check.py` with
+  coordinates in mm from the design's top-left corner.
