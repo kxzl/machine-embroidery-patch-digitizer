@@ -435,6 +435,21 @@ It reports:
 Each warning lists up to 5 spots in mm from the top-left of the design. Many
 trims and many colour changes make the machine stop often.
 
+### Satin precheck
+
+Some outline satins have a rail geometry Ink/Stitch cannot build (a short hook or loop
+narrower than the satin). The export then dies with `IndexError: tuple index out of
+range` in `flattened_sections` and names no element. `run.sh` now runs
+`tools/digitize/qa/satin_precheck.py` before the export: it builds each satin column on
+its own, prints `bad satin: ID` for the ones that raise and removes them from the SVG.
+Closed outline loops shorter than 10 satin widths are dropped earlier, in `vectorize.py`
+(the note says "closed on themselves"). Used alone:
+
+```bash
+PYTHONPATH=tools/wxstub INKSTITCH_OFFLINE_SCRIPT=true \
+  .venv/bin/python tools/digitize/qa/satin_precheck.py design.svg [--fix design.svg]
+```
+
 ### Recipe for a machine that jams
 
 ```yaml
@@ -470,3 +485,8 @@ tools/digitize/run.sh --key-background --keep-enclosed --no-satin-extend --confi
   junctions.
 - `--keep-enclosed` keeps pale interior colours from being keyed out. Use it
   when the art has off-white parts.
+- `border: thickness_mm: 1.8` (default 2.5) when the jam check shows a thread-per-cell spike
+  far above the others on the border: the 2.5 mm satin folds at a hairpin between two thin
+  parts (a spider's leg tips gave 61.8 mm, 25.8 mm at 1.8).
+- `skip_colors: ['#101010']` leaves a colour unstitched, for a patch cut from fabric of that
+  colour (the goat's black disc on black twill: 18,488 stitches become 10,038).
