@@ -12,6 +12,7 @@ __pycache__/
 input/
 output_inkstitch_svg/
 output_vp3/
+output/
 Embroidery_samples/
 patch_descriptions/
 
@@ -36,3 +37,7 @@ opencode.json
 # keep committed regression-test fixtures (images/snapshots the tests compare)
 !tools/digitize/tests/
 !tools/digitize/tests/**
+
+# python caches inside the re-included test folder
+tools/digitize/tests/__pycache__/
+tools/digitize/tests/**/__pycache__/
