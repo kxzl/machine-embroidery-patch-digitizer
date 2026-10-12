@@ -585,7 +585,8 @@ class StitchPlan(ServerTestCase):
         self.assertNotIn('id="s1"', (jobdir / "plan.svg").read_text())
         self.assertIn('id="s1"', (jobdir / "slice.svg").read_text())
         args = (jobdir / "export_args.txt").read_text().strip()
-        self.assertTrue(args.endswith("plan.svg %s/plan" % jobdir), args)   # the copy, not slice.svg
+        self.assertTrue(args.startswith("%s/plan.svg %s/plan " % (jobdir, jobdir)), args)  # the copy
+        self.assertIn("--config %s/job.yaml" % jobdir, args)    # travel_vp3.py reads travel:
 
     def test_background_flag_from_the_job_yaml(self):
         cases = [("", None), ("profile: vadmel\n", "#101010"), ("profile: VadMel\n", "#101010"),
@@ -612,6 +613,10 @@ class StitchPlan(ServerTestCase):
         args = (self.job_dir() / "export_args.txt").read_text()
         self.assertIn("#123456", args)
         self.assertNotIn("#abcdef", args)
+        # the --config file is the working Slice's too, so its travel: section matches the SVG
+        config = (self.job_dir() / "job.yaml").read_text()
+        self.assertIn("#123456", config)
+        self.assertNotIn("#abcdef", config)
 
     def test_no_machine_file(self):
         self.slice_first()

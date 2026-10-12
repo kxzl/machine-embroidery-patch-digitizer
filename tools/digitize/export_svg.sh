@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Export one Ink/Stitch SVG to a VP3 machine file and the two preview PNGs.
 #
-# Usage: tools/digitize/export_svg.sh <svg> <out_prefix> [--background HEX]
+# Usage: tools/digitize/export_svg.sh <svg> <out_prefix> [--background HEX] [--config F]
+#                                     [--no-travel-under | --travel-max-mm N]
 #   <svg>          the Slice's SVG. The satin precheck may fix it in place.
 #   <out_prefix>   writes <out_prefix>.vp3, <out_prefix>_stitchplan.png,
 #                  <out_prefix>_coverage.png, <out_prefix>.zip and <out_prefix>.err
 #   --background HEX  preview canvas colour; run.sh works it out from the config
+#   --config F     the per-image YAML; travel_vp3.py reads its travel: section
+#   --no-travel-under | --travel-max-mm N  same as run.sh (travel_vp3.py)
 #
 # It echoes the same "== ..." stage lines as run.sh, so the caller can follow along.
 # No timeout: Cancel stops it (qa/export.sh's timeout 1800 would kill a long cold export).
@@ -14,16 +17,24 @@ set -euo pipefail
 SVG=""
 OUT=""
 BACKGROUND=""
+CONFIG=""
+NO_TRAVEL=0
+TRAVEL_ARGS=()
 while [[ $# -gt 0 ]]; do
   a="$1"; shift
   case "$a" in
     --background) BACKGROUND="$1"; shift ;;
     --background=*) BACKGROUND="${a#*=}" ;;
+    --config) CONFIG="$1"; shift ;;
+    --config=*) CONFIG="${a#*=}" ;;
+    --no-travel-under) NO_TRAVEL=1 ;;
+    --travel-max-mm) TRAVEL_ARGS+=(--max-mm "$1"); shift ;;
+    --travel-max-mm=*) TRAVEL_ARGS+=(--max-mm "${a#*=}") ;;
     -*) echo "note: ignoring unknown flag $a" >&2 ;;
     *) if [[ -z "$SVG" ]]; then SVG="$a"; else OUT="$a"; fi ;;
   esac
 done
-USAGE="usage: export_svg.sh <svg> <out_prefix> [--background HEX]"
+USAGE="usage: export_svg.sh <svg> <out_prefix> [--background HEX] [--config F] [--no-travel-under | --travel-max-mm N]"
 : "${SVG:?$USAGE}"
 : "${OUT:?$USAGE}"
 
@@ -69,6 +80,11 @@ print(f"  threads: {threads}")
 PYEOF
 
 echo "== stitch plan"
+# same-colour trims become a run under later stitching; trim_vp3 then cuts what is left
+if [[ "$NO_TRAVEL" != "1" ]]; then
+  .venv/bin/python tools/digitize/travel_vp3.py "$DIR/$BASE.vp3" \
+    ${CONFIG:+--config "$CONFIG"} "${TRAVEL_ARGS[@]}"
+fi
 .venv/bin/python tools/digitize/trim_vp3.py "$DIR/$BASE.vp3" 8
 # two renders: hairlines show the individual stitches (layout check), thread
 # width shows what the fabric will actually look like (coverage check).  At

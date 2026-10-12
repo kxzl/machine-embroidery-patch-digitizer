@@ -46,6 +46,11 @@ What the numbers show:
 - A proxy seen during the T4-lite run on 2026-10-12: Skyfowl re-sliced with YAML
   `satinize.colors` for two colours (12 satinized Regions) exported in 12.4 s
   against the cache of its plain version (cold 26 s through the UI).
+- After merging origin/master `6822535` (travel-under, goat-green) on 2026-10-12:
+  Skyfowl at 75 mm, 6 colours, empty YAML. The UI's stitch plan and `run.sh` with
+  the same arguments gave byte-identical VP3 files (25,588 stitches by
+  `wizard/vp3.measure`; `travel_vp3.py` turned 45 of 98 trims into runs). The
+  UI export ran cold in 57.7 s; `run.sh` then ran in 16 s on the warm cache.
 - Re-export after a real override is **not measured yet**. A toggle can also
   change neighbouring fills (underlap) and trims, which may miss the cache. At
   Bomb's average of about 7 s per object, a few misses cost tens of seconds and
@@ -320,9 +325,12 @@ next to `setup` and `doctor`), new `tools/digitize/tests/test_web_server.py`.
   `--config output/web/<slug>/job.yaml` (operator YAML plus `stitch_overrides`),
   under a unique base from `core._make_base`, then move the SVG, sidecar and
   `_posterized.png` into the job folder.
-- Make stitch plan: copy `run.sh` lines 140 to 181 (satin precheck, Ink/Stitch
-  export, unzip, `trim_vp3.py`, two `preview.py` renders, jam check) into
-  `export_svg.sh <svg> <out_prefix> [--background HEX]`. It fixes the SVG in place
+- Make stitch plan: copy `run.sh`'s export block (satin precheck, Ink/Stitch
+  export, unzip, `travel_vp3.py`, `trim_vp3.py`, two `preview.py` renders, jam check)
+  into `export_svg.sh <svg> <out_prefix> [--background HEX] [--config F]
+  [--no-travel-under | --travel-max-mm N]`. The server passes the Slice's `job.yaml`
+  as `--config`, so `travel_vp3.py` reads the same `travel:` section the CLI would.
+  It fixes the SVG in place
   and writes `<out_prefix>.vp3`, `<out_prefix>_stitchplan.png`,
   `<out_prefix>_coverage.png`, `<out_prefix>.zip` and `<out_prefix>.err`, and echoes
   the same `== ...` stage lines as `run.sh`. The server copies `slice.svg` to

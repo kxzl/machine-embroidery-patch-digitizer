@@ -671,8 +671,10 @@ def create_app(root, run_sh=None, export_sh=None, out_root=None, port=None) -> F
                 shutil.copyfile(str(source), str(jobdir / "plan.svg"))
             except OSError as exc:
                 return fail("plan.svg could not be written (%s)." % exc, 400)
-            args = [jobdir / "plan.svg", jobdir / "plan"] + (["--background", background]
-                                                            if background else [])
+            # job.yaml is replaced only when a Slice works, so it is this Slice's config;
+            # travel_vp3.py reads its travel: section, as in run.sh.
+            args = ([jobdir / "plan.svg", jobdir / "plan", "--config", jobdir / "job.yaml"]
+                    + (["--background", background] if background else []))
             job.start(export_sh, args, jobdir / "log.txt", "exporting",
                       finish_plan(slice_id, jobdir, source, hoop))
         return jsonify({"slice_id": slice_id}), 202
