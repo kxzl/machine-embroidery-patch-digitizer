@@ -131,8 +131,10 @@ put on `PYTHONPATH` automatically by `run.sh` for the Ink/Stitch export step.
 | `--no-border` | off | Don't add the satin border. |
 | `--density MM` | `0.4` raster / `0.3` SVG | Default fill row spacing (mm). Keep in `0.3–0.6`; below breaks needles, above leaves gaps. The SVG path defaults to `0.3` because `0.4` left the base fabric visible on the Scavenger's Daughter test. **An explicit density (CLI or YAML) overrides the `row_spacing_mm` authored on the artwork** — the Scavenger's paths ship `0.4`, which otherwise silently wins and reopens the gaps. |
 | `--no-satin-outlines` | off | Keep the darkest colour entirely as fill instead of turning thin linework into satin. |
+| `--rail-satin` | off | Stitch the **solid** parts of the outline colour as satin instead of leaving them fill: a blob whose skeleton is not a stroke (a star, a pommel) becomes 1-3 rail satin rows, and whatever the skeleton satin does not reach is rail-satinized too. Costs a denser stitch, so it is per image. See **Rail satin**. |
 | `--no-satin-extend` | off | Outline satin ends are extended by half the local line width where they meet another line (and 0.3 mm at free ends) so junctions close; this flag restores square ends at the junction pixel. |
 | `--satin-max-mm W` | `2.5` | Regions of the outline colour thicker than this stay fills (not outlines). |
+| `--satin-taper MM` | `0` | Give the satin a **varying width**: split each run into pieces about MM long, each with the width its own stretch of line measures, instead of one median width for the whole run. A sword blade or a flared serif keeps its shape; a constant-width line still gives one satin. See **Tapered satin**. |
 | `--underlap-mm N` | `0.6` | Grow every fill up to N mm under the layers stitched after it (later fills, satin outlines, satin border), clipped to the silhouette. Closes the colour seams and the fill/border gap that fabric pull opens. `0` disables and reproduces the pre-underlap output byte-for-byte. |
 | `--raster-pull-mm N` | `0` | Stretch each fill N mm along its stitch-row angle (`--fill-angle` / YAML `angle` / 0), clipped to the silhouette **grown** by N, so overshooting the outer edge by N is intended. Compensates the pull that narrows a fill along its rows; this is the fast replacement for Ink/Stitch's own `pull_compensation_mm` on fills (see the caveat below). `0` disables; the vadmel profile sets `0.25`. |
 | `--profile NAME` | none | Select a named fabric profile (`vadmel`). Sets density, underlap, raster pull and underlay unless each is overridden by an explicit CLI flag or YAML key. See **Fabric profiles**. |
@@ -148,7 +150,7 @@ put on `PYTHONPATH` automatically by `run.sh` for the Ink/Stitch export step.
 | `--no-trim` | off | Trimming is **on by default**; this disables it. |
 | `--trim` | on | Explicitly enable trimming (already the default; also overrides `trim.enabled: false` in a YAML config). |
 | `--trim-mm N` | `4.0` | Cut a jump longer than this (mm); `0` = cut every long/exposed jump. A jump is skipped only when both its nearest-boundary distance and its worst one-sided travel are under the threshold; jumps under 2 mm are always skipped. The last object of every layer is trimmed when the next object is farther than 2 mm. |
-| `--config F` | none | Per-image YAML config (`order`, `skip_colors`, `density`, `angle`, `border`, `trim`, `palette`, `palette_mode`, `profile`, `underlap_mm`, `raster_pull_mm`, `fill_underlay_skip_last`, `fill_underlay_double`, `satin_underlay`, `border_zigzag_spacing_mm`, `fabric_color`). CLI flags win over its values. Generate a starter with `tools/digitize/make_config.py <image>`, which also parses the `**Palette:**` line from `patch_descriptions/prompts/<name>.md` into `palette:` when one exists. |
+| `--config F` | none | Per-image YAML config (`order`, `skip_colors`, `density`, `angle`, `border`, `trim`, `palette`, `palette_mode`, `profile`, `underlap_mm`, `raster_pull_mm`, `fill_underlay_skip_last`, `fill_underlay_double`, `satin_underlay`, `border_zigzag_spacing_mm`, `satin_taper_mm`, `rail_satin`, `rail_satin_leftover`, `fabric_color`). CLI flags win over its values. Generate a starter with `tools/digitize/make_config.py <image>`, which also parses the `**Palette:**` line from `patch_descriptions/prompts/<name>.md` into `palette:` when one exists. |
 | `--no-export` | off | `run.sh` only: stop after writing the SVG, skip the Ink/Stitch VP3 export. Not forwarded to `vectorize.py`. |
 | (positional) input | — | Path to the source image (`.webp`/`.png`/`.jpg`). |
 | (positional) output | `work/design.svg` | Output SVG path. |
@@ -490,6 +492,55 @@ It reports:
 
 Each warning lists up to 5 spots in mm from the top-left of the design. Many
 trims and many colour changes make the machine stop often.
+
+### Tapered satin (`--satin-taper MM`, `satin_taper_mm:` YAML)
+
+By default one skeleton run gets **one** satin width: the median of the distance
+transform along it. On artwork that thickens and thins that reads wrong. A sword
+blade is 4 mm at the guard and under 1 mm at the point, so one width leaves the
+top hollow or makes the tip a blob.
+
+`--satin-taper MM` splits each run into pieces about MM long and gives each piece
+the width its own stretch of line measures (p95 of the local distance transform).
+Neighbouring pieces whose widths agree are merged, so a constant-width line still
+comes out as one satin rather than twenty, and a piece too short to stitch on its
+own is merged into its neighbour. Runs are still tiled end to end, so there is no
+gap between pieces.
+
+A shorter MM follows the line more closely but emits more, shorter satins, and a
+piece shorter than 1.5x its own width is dropped as unstitchable. `6` suits
+lettering and a blade at 100 mm; below about `4` the gains stop paying for the
+extra satin ends. The value is a length, `0` (the default) keeps one width per run.
+
+### Rail satin (`--rail-satin`, `rail_satin:` YAML)
+
+Linework is satinized along its skeleton, which is right for a stroke but wrong for
+a **solid** shape: a five-pointed star's skeleton is a handful of short spokes, so
+the star is stitched as a snowflake, and the thick flare of a letter stem that the
+median-width band does not reach is left as a tatami fill.
+
+With `--rail-satin` the pipeline adds two passes for the outline colour:
+
+1. **Blobs.** A hole-free component whose widest skeleton band is under 55 % of its
+   own thickest point is solid, not a stroke (a stroke sits at 0.8-1.0). It is
+   split along its long axis into 1-3 **rail satin** rows whose rails follow its
+   outline, the same builder the Scavenger's Daughter plates use.
+2. **Leftovers.** Whatever no skeleton satin covered is solid too, and is
+   rail-satinized the same way.
+
+Two guards keep it safe: a shape with a hole is never rail-satinized (its skeleton
+is the ring around the hole, which is the satin you want), and a component whose
+rows would leave more than 20 % of their band outside the shape, or whose rails
+come within 0.25 mm of each other, stays a fill. Set `rail_satin_leftover: false`
+to keep pass 1 only.
+
+Rail satins carry more thread per millimetre than skeleton bands (the zigzag spans
+the whole row), so this is opt-in per image.
+
+```yaml
+rail_satin: true
+rail_satin_leftover: true
+```
 
 ### Satin precheck
 
