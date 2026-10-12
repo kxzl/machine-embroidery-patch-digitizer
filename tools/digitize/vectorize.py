@@ -74,6 +74,14 @@ TOLERANCE_MM = 0.25        # polygon simplification (mm); 0.25 measured 1.5x fas
                            # export vs 0.15 with ~0.8% fewer stitches and no visible
                            # difference (docs/adr/0002-export-performance.md)
 TRIM_MIN_MM = 2.0          # never cut jumps shorter than this (Ink/Stitch adds no locks below ~3 mm)
+SMALL_FILL_MM2 = 2.5       # ADR 0003, as in svg_digitize.py: fills smaller than this get no
+                           # underlay and no ties (each tiny element otherwise packs
+                           # underlay + lock stitches into a few mm2)
+SMALL_FILL_MIC_MM = 1.0    # ... same for any component thinner than this even if it is long
+CIRCLE_GAP_MM = 1.0        # border.mode circle with gaps: the ring stops this far from a
+                           # shape that crosses it (the art's keyline width)
+CROSS_REACH_DEG = 15.0     # border.mode circle: a crossing shape may enter the ring band
+                           # this many degrees away from where it leaves the circle
 
 # Named fabric profiles (review.md section 2.5): reviewed starting values for one
 # fabric type.  YAML ``profile:`` / ``--profile`` selects one; an explicit CLI
@@ -140,6 +148,15 @@ class Settings:
     thin_lines: str = "widen"     # outline runs under the satin gate: "widen" to satin, or "run" = bean stitch
     outline_order: str = "centroid"   # outline stitch order: by "centroid" (default) or by path "endpoint"
     outline_zigzag_spacing_mm: float | None = None   # satin zigzag spacing on outline satins (None = Ink/Stitch 0.4)
+    cleanup_min_width_mm: float = 0.0   # >0: parts of any colour thinner than this join the nearest colour
+    cleanup_min_area_mm2: float = 0.0   # >0: islands smaller than this join the nearest colour
+    cleanup_fabric_min_width_mm: float | None = None   # the same for skipped colours (fabric
+    cleanup_fabric_min_area_mm2: float | None = None   # showing through); None = as above
+    thread_map: dict = field(default_factory=dict)   # source hex -> thread hex written to the SVG
+    border_color: str = ""        # border colour as a source hex ("" = mode default)
+    border_order: str = "last"    # circle border: "last" (on top) or "first" (art sewn over it)
+    border_gaps: bool = True      # circle border sewn last: leave a gap where the art crosses it
+    border_underlay: bool = False  # centre-walk + contour underlay on the border satin
     # algorithm constants (module-level defaults, overridable per class later)
     satin_min_mm: float = SATIN_MIN_MM
     satin_gate_mm: float = SATIN_GATE_MM
@@ -192,6 +209,9 @@ class Border:
     closed: list = field(default_factory=list)     # True when a path is a closed ring (normal border)
     outline_paths: list = field(default_factory=list)   # running-stitch outlines for tiny/thin parts
     outline_pts: list = field(default_factory=list)
+    circle: tuple | None = None   # border.mode circle: fitted (cy, cx, R) in px, ring paths
+                                  # built later by circle_ring once the labels are known
+    first: bool = False           # sew the border before the fills (art crosses over it)
 
 
 @dataclass
@@ -482,6 +502,39 @@ def build_settings(flags, cfg):
                                # 2.9 % uncovered on a flame lobe vs 0.05 % at 0.3 mm)
                                row_spacing_mm=float(_g.get("row_spacing_mm", 0.3))))
 
+    # --- cleanup: merge parts below the art's detail limit into their neighbour ---
+    _clean = cfg.get("cleanup") or {}
+    if not isinstance(_clean, dict):
+        print(f"warning: ignoring non-mapping cleanup {_clean!r}")
+        _clean = {}
+    try:
+        cleanup_min_width_mm = float(_clean.get("min_width_mm", 0.0) or 0.0)
+        cleanup_min_area_mm2 = float(_clean.get("min_area_mm2", 0.0) or 0.0)
+        _fw, _fa = _clean.get("fabric_min_width_mm"), _clean.get("fabric_min_area_mm2")
+        cleanup_fabric_min_width_mm = None if _fw is None else float(_fw)
+        cleanup_fabric_min_area_mm2 = None if _fa is None else float(_fa)
+    except (TypeError, ValueError):
+        print("warning: ignoring non-numeric cleanup values")
+        cleanup_min_width_mm = cleanup_min_area_mm2 = 0.0
+        cleanup_fabric_min_width_mm = cleanup_fabric_min_area_mm2 = None
+
+    # --- threads: stitch a source colour in a different thread colour ----------
+    thread_map = {}
+    for _k, _v in (cfg.get("threads") or {}).items():
+        _src, _dst = _parse_palette([_k]), _parse_palette([_v])
+        if _src and _dst:
+            thread_map[_src[0]] = _dst[0]
+
+    # --- circle border options ---------------------------------------------------
+    _bcol = _parse_palette([_border_cfg["color"]]) if _border_cfg.get("color") else []
+    border_color = _bcol[0] if _bcol else ""
+    border_order = str(_border_cfg.get("order", "last")).strip().lower()
+    if border_order not in ("first", "last"):
+        print(f"warning: ignoring border.order {border_order!r} (use first or last)")
+        border_order = "last"
+    border_gaps = bool(_border_cfg.get("gaps", True))
+    border_underlay = bool(_border_cfg.get("underlay", False))
+
     for _name, _val in [("global", row_spacing_mm)] + list(_density.items()):
         if not 0.3 <= _val <= 0.6:
             print(f"warning: density {_val} mm ({_name}) is outside the safe 0.3-0.6 mm range "
@@ -511,6 +564,11 @@ def build_settings(flags, cfg):
         border_zigzag_spacing_mm=border_zigzag, fabric_color=fabric_color,
         gradients=_gradients, thin_lines=_thin, outline_order=_oo,
         trim_min_mm=_trim_min, outline_zigzag_spacing_mm=_ozz,
+        cleanup_min_width_mm=cleanup_min_width_mm, cleanup_min_area_mm2=cleanup_min_area_mm2,
+        cleanup_fabric_min_width_mm=cleanup_fabric_min_width_mm,
+        cleanup_fabric_min_area_mm2=cleanup_fabric_min_area_mm2,
+        thread_map=thread_map, border_color=border_color, border_order=border_order,
+        border_gaps=border_gaps, border_underlay=border_underlay,
     )
 
 
@@ -777,12 +835,269 @@ def _original_part(sil_lab, part):
     return sil_lab == int(counts.argmax())
 
 
+def fit_circle(sil, step_deg=1.0, tol=0.04):
+    """Circle ``(cy, cx, R)`` in px through the outer edge of a round patch.
+
+    One ray per ``step_deg`` from the centre takes the outermost silhouette
+    pixel.  Rays more than ``tol`` off the median radius (a horn, a beard, a
+    chip in a rough edge) stay out of the least-squares fit.  Two rounds, so the
+    second casts from the fitted centre instead of the silhouette centroid.
+    """
+    H, W = sil.shape
+    ys, xs = np.nonzero(sil)
+    cy, cx = float(ys.mean()), float(xs.mean())
+    r = np.arange(int(np.hypot(H, W)))
+    R = 0.0
+    for _ in range(2):
+        pts = []
+        for th in np.radians(np.arange(0.0, 360.0, step_deg)):
+            y = np.round(cy - r * np.sin(th)).astype(int)
+            x = np.round(cx + r * np.cos(th)).astype(int)
+            ok = (y >= 0) & (y < H) & (x >= 0) & (x < W)
+            hit = np.nonzero(sil[y[ok], x[ok]])[0]
+            if len(hit):
+                k = hit.max()
+                pts.append((y[ok][k], x[ok][k], r[ok][k]))
+        pts = np.asarray(pts, float)
+        med = np.median(pts[:, 2])
+        inl = np.abs(pts[:, 2] - med) <= tol * med
+        Y, X = pts[inl, 0], pts[inl, 1]
+        A = np.c_[2 * X, 2 * Y, np.ones_like(X)]
+        (a, b, c), *_ = np.linalg.lstsq(A, X ** 2 + Y ** 2, rcond=None)
+        cy, cx, R = float(b), float(a), float(np.sqrt(c + a * a + b * b))
+    return cy, cx, R
+
+
+def clean_labels(img, scale, palette, settings):
+    """Merge parts below the art's detail limit into the nearest colour (YAML ``cleanup:``).
+
+    Every colour takes part, skipped colours included, inside the silhouette.
+    First the parts thinner than ``min_width_mm`` (what an opening with a disc
+    that wide removes), then connected islands smaller than ``min_area_mm2``.
+    The freed pixels take the colour of the nearest pixel that stays, so a
+    sliver between two shades joins them and a speck inside a fill closes the
+    hole, instead of each becoming its own object with its own locks and cuts.
+
+    Skipped colours are the fabric showing through and take ``fabric_min_*``
+    when set: a spot of fabric inside a fill is only a hole and costs no cut.
+    A thin fabric part is filled in only when one stitched colour alone lies
+    next to it: a line that splits one colour into two islands (a cut each)
+    closes, a keyline between two different colours or along the patch edge
+    stays (it separates the tones or outlines the patch, and costs nothing).
+    """
+    fw, fa = settings.cleanup_fabric_min_width_mm, settings.cleanup_fabric_min_area_mm2
+    if (settings.cleanup_min_width_mm <= 0 and settings.cleanup_min_area_mm2 <= 0
+            and not fw and not fa):
+        return
+    sil = img.silhouette
+    L = palette.label_all.copy()
+    ppm = scale.px_per_mm
+    labels = [int(c) for c in np.unique(L[sil])]
+    skipped = {c for c in labels if hexkey(palette.centroids[c]).lower() in settings.skip}
+
+    def width_mm(c):
+        return fw if c in skipped and fw is not None else settings.cleanup_min_width_mm
+
+    def area_mm2(c):
+        return fa if c in skipped and fa is not None else settings.cleanup_min_area_mm2
+
+    def islands():
+        return {c: ndimage.label((L == c) & sil)[1] for c in labels}
+
+    def refill(free):
+        keep = sil & ~free
+        if free.any() and keep.any():
+            iy, ix = ndimage.distance_transform_edt(~keep, return_distances=False,
+                                                    return_indices=True)
+            L[free] = L[iy[free], ix[free]]
+
+    def thin(c):
+        r = width_mm(c) * ppm / 2.0
+        m = (L == c) & sil
+        if r <= 0:
+            return np.zeros_like(sil), r
+        core = ndimage.distance_transform_edt(m) > r                  # erosion by a disc
+        return m & ~(ndimage.distance_transform_edt(~core) <= r), r   # minus the opening
+
+    before = islands()
+    stitched = [c for c in labels if c not in skipped]
+    joins = []
+    for c in skipped:
+        part, r = thin(c)
+        if part.any() and stitched:
+            near = [ndimage.distance_transform_edt(~((L == s) & sil)) <= r + 1.5 for s in stitched]
+            # the patch edge counts as a neighbour too: a fabric line along the
+            # edge is an outline, not a split
+            n_near = np.sum(near, axis=0) + (ndimage.distance_transform_edt(sil) <= r + 1.5)
+            for s, nr in zip(stitched, near):
+                joins.append((part & nr & (n_near == 1), s))
+    free = np.zeros_like(sil)
+    for c in stitched:
+        free |= thin(c)[0]
+    for m, s in joins:
+        L[m] = s
+    refill(free)
+    for _ in range(3):
+        free = np.zeros_like(sil)
+        for c in labels:
+            a_px = area_mm2(c) * ppm * ppm
+            lab, n = ndimage.label((L == c) & sil)
+            if n and a_px > 0:
+                small = np.nonzero(np.bincount(lab.ravel()) < a_px)[0]
+                small = small[small > 0]
+                if len(small):
+                    free |= np.isin(lab, small)
+        if not free.any():
+            break
+        refill(free)
+    after = islands()
+    palette.label_all = L
+    print("cleanup: islands per colour " + ", ".join(
+        f"{hexkey(palette.centroids[c])} {before[c]} -> {after[c]}" for c in labels)
+        + f" (thinner than {settings.cleanup_min_width_mm:g} mm or smaller than "
+          f"{settings.cleanup_min_area_mm2:g} mm2 joins its neighbour"
+        + (f"; fabric {width_mm(min(skipped)):g} mm, {area_mm2(min(skipped)):g} mm2" if skipped else "")
+        + ")")
+
+
+def _arc_sector(ang):
+    """Smallest angular interval ``(lo, width)`` in degrees holding every angle in ``ang``."""
+    a = np.sort(np.mod(ang, 360.0))
+    gaps = np.diff(np.r_[a, a[0] + 360.0])
+    k = int(np.argmax(gaps))
+    lo = a[(k + 1) % len(a)]
+    return lo, 360.0 - float(gaps[k])
+
+
+def circle_ring(img, scale, palette, border, fill_colors, settings):
+    """Build the circle border once the labels are known (``border: mode: circle``).
+
+    The ring is a satin ``border_mm`` wide whose outer edge is the fitted
+    circle.  Art that crosses the circle (horns, a beard) is found by angle,
+    not by connectivity, because keylines cut a horn into separate stripes:
+    stitched pixels just outside the circle, grouped into angular clusters,
+    each widened to the stitched pixels at the band's inner edge within
+    ``CROSS_REACH_DEG`` (an oblique horn enters the band at another angle than
+    it leaves).  Stitched art outside the circle is kept, and in the band only
+    inside those sectors, so the art's own thin rim is removed everywhere
+    else: the ring is the only thing sewn there.
+
+    Sewn last with ``gaps``, the ring stops ``CIRCLE_GAP_MM`` short of each
+    crossing shape, so the shape reads as lying over it.  Sewn first, the ring
+    is one closed satin and the crossing shapes are sewn over it.
+    """
+    cy, cx, R = border.circle
+    ppm = scale.px_per_mm
+    t = scale.border_px
+    H, W = img.H, img.W
+    yy, xx = np.mgrid[0:H, 0:W]
+    rr = np.hypot(yy - cy, xx - cx)
+    ang = np.degrees(np.arctan2(cy - yy, xx - cx))
+    stitched = img.silhouette & np.isin(palette.label_all, fill_colors)
+    out_ang = np.sort(np.mod(ang[stitched & (rr > R + 0.3 * ppm) & (rr <= R + 2.0 * ppm)], 360.0))
+    in_ang = np.mod(ang[stitched & (rr > R - t - 2.0 * ppm) & (rr <= R - t)], 360.0)
+    clusters = []
+    if len(out_ang):
+        # split the sorted angles wherever two neighbours are more than 3 degrees apart
+        cut = np.nonzero(np.diff(np.r_[out_ang, out_ang[0] + 360.0]) > 3.0)[0]
+        if len(cut) == 0:
+            clusters = [out_ang]
+        else:
+            start = (cut[-1] + 1) % len(out_ang)
+            ring_order = np.r_[out_ang[start:], out_ang[:start] + 360.0]
+            bounds = np.nonzero(np.diff(ring_order) > 3.0)[0]
+            clusters = np.split(ring_order, bounds + 1)
+    in_sector = np.zeros((H, W), dtype=bool)       # where a crossing shape passes the band
+    out_sector = np.zeros((H, W), dtype=bool)      # ... and where its tip may curve outside
+    for cl in clusters:
+        lo, width = _arc_sector(cl)
+        d = np.mod(in_ang - (lo - CROSS_REACH_DEG), 360.0)
+        entering = in_ang[d <= width + 2 * CROSS_REACH_DEG]
+        lo, width = _arc_sector(np.r_[cl, entering])
+        in_sector |= np.mod(ang - lo, 360.0) <= width
+        out_sector |= np.mod(ang - (lo - CROSS_REACH_DEG), 360.0) <= width + 2 * CROSS_REACH_DEG
+    n_cross = len(clusters)
+    keep = stitched & (((rr > R) & out_sector) | ((rr > R - t) & (rr <= R) & in_sector))
+
+    # the ring band and the outside belong to the ring now, except where art crosses
+    removed = stitched & (rr > R - t) & ~keep
+    img.silhouette = img.silhouette & ~((rr > R - t) & ~keep)
+    band = (rr > R - t) & (rr <= R)
+
+    if settings.border_color:
+        h = settings.border_color
+        border.color = np.array([int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16)])
+    else:
+        border.color = palette.centroids[min(fill_colors, key=lambda c: luma(palette.centroids[c]))]
+
+    Rm = R - t / 2.0
+    step = np.degrees(1.0 * ppm / Rm)                 # a path point every ~1 mm
+    gaps = settings.border_gaps and not border.first and n_cross > 0
+    if gaps:
+        gap_px = CIRCLE_GAP_MM * ppm + settings.satin_pull_mm * ppm
+        near = ndimage.distance_transform_edt(~keep) <= gap_px
+        fine = np.arange(0.0, 360.0, 0.25)
+        blocked = np.zeros(len(fine), dtype=bool)
+        for i, a in enumerate(np.radians(fine)):
+            for rad in np.linspace(R - t, R, 9):
+                y, x = int(round(cy - rad * np.sin(a))), int(round(cx + rad * np.cos(a)))
+                if 0 <= y < H and 0 <= x < W and near[y, x]:
+                    blocked[i] = True
+                    break
+        # rotate so the list starts inside a gap, then cut it into open runs
+        s = int(np.argmax(blocked))
+        order = np.r_[np.arange(s, len(fine)), np.arange(0, s)]
+        arcs, cur = [], []
+        for i in order:
+            if blocked[i]:
+                if cur:
+                    arcs.append(cur)
+                cur = []
+            else:
+                cur.append(fine[i])
+        if cur:
+            arcs.append(cur)
+        for arc in arcs:
+            a0, a1 = arc[0], arc[0] + (len(arc) - 1) * 0.25
+            if np.radians(a1 - a0) * Rm < 3.0 * t:
+                continue                      # a stub shorter than 3 widths packs, skip it
+            th = np.radians(np.linspace(a0, a1, max(2, int((a1 - a0) / step) + 1)))
+            poly = np.c_[cy - Rm * np.sin(th), cx + Rm * np.cos(th)]
+            border.polys.append(poly)
+            border.pts_list.append(poly)
+            border.widths.append(t)
+            border.closed.append(False)
+            border.paths.append("M " + " L ".join(f"{x:.1f},{y:.1f}" for y, x in poly))
+        border.ring = band & ~near
+    else:
+        th = np.radians(np.arange(0.0, 360.0, step))
+        poly = np.c_[cy - Rm * np.sin(th), cx + Rm * np.cos(th)]
+        border.polys.append(poly)
+        border.pts_list.append(poly)
+        border.widths.append(t)
+        border.closed.append(True)
+        border.paths.append("M " + " L ".join(f"{x:.1f},{y:.1f}" for y, x in poly) + " Z")
+        border.ring = band & ~keep
+    print(f"border: circle ring {settings.border_mm} mm, colour {hexkey(border.color)}, "
+          f"{len(border.paths)} satin path(s), {n_cross} crossing shape(s) kept over it, "
+          f"{removed.sum() / ppm ** 2:.1f} mm2 of art in the band or outside the circle removed")
+
+
 def detect_border(img, scale, settings):
     """Detect the satin border ring / colour (transparent-background patches only)."""
     W, H = img.W, img.H
     border_off = settings.no_border or settings.border_mode == "off"
     border = Border(off=border_off)
     if not (img.has_transparency and not border_off):
+        return border
+
+    if settings.border_mode == "circle":
+        border.circle = fit_circle(img.silhouette)
+        border.first = settings.border_order == "first"
+        cy, cx, R = border.circle
+        print(f"border: circle fitted, centre ({cx / scale.px_per_mm:.1f}, {cy / scale.px_per_mm:.1f}) mm, "
+              f"diameter {2 * R / scale.px_per_mm:.1f} mm, ring {settings.border_mm} mm, "
+              f"sewn {settings.border_order}")
         return border
 
     dt = ndimage.distance_transform_edt(img.silhouette)
@@ -1127,7 +1442,7 @@ def compensate_masks(masks, img, scale, border, palette, fill_colors, lw_cover, 
         later = np.zeros((H, W), dtype=bool)
         if lw_cover is not None:
             later |= lw_cover
-        if border.ring is not None:
+        if border.ring is not None and not border.first:   # a ring sewn first is not later
             later |= border.ring
         for c in reversed(fill_colors):     # walk from the top layer down
             m0 = masks[c]                   # base mask: later fills stay un-grown
@@ -1330,6 +1645,19 @@ def gradient_regions(img, scale, palette, masks, fill_colors, lw, settings):
     return out
 
 
+def _is_small_fill(geom, px_per_mm):
+    """ADR 0003: smaller than SMALL_FILL_MM2 or thinner than SMALL_FILL_MIC_MM."""
+    from shapely import maximum_inscribed_circle
+    if geom is None or geom.is_empty:
+        return False
+    if geom.area / px_per_mm ** 2 < SMALL_FILL_MM2:
+        return True
+    try:
+        return 2.0 * maximum_inscribed_circle(geom).length / px_per_mm < SMALL_FILL_MIC_MM
+    except Exception:
+        return False
+
+
 def fill_components(img, scale, border, palette, masks, fill_colors, lw, lw_cover, settings):
     """Contour every fill colour; satinize the components listed in satinize.colors."""
     from shapely import affinity
@@ -1377,7 +1705,8 @@ def fill_components(img, scale, border, palette, masks, fill_colors, lw, lw_cove
                     continue        # the satin replaces this fill component
             items.append(dict(cent=cents[i], pts=pts[i], d=paths[i], satin=False,
                               lab_id=i + 1, rgb=palette.centroids[c],
-                              spacing=settings.density_map.get(hx), width_px=None, angle=angle))
+                              spacing=settings.density_map.get(hx), width_px=None, angle=angle,
+                              small=_is_small_fill(geoms[i], scale.px_per_mm)))
         color_items[c] = items
         color_keep_lab[c] = keep_lab
         _sat_note = f", {n_sat} -> satin" if n_sat else ""
@@ -1475,6 +1804,30 @@ def order_objects(img, scale, palette, fill_colors, color_items, color_keep_lab,
     for s in satinized_satins:
         color_satins.setdefault(s["cluster"], []).append(s)
 
+    def add_border_satins():
+        nonlocal stitch_index, needle
+        for d_path, poly, wpx, closed in zip(border.paths, border.pts_list,
+                                              border.widths, border.closed):
+            o = dict(group_id="border", group_label="Border",
+                     cent=(float(poly[:, 0].mean()), float(poly[:, 1].mean())),
+                     pts=poly, d=d_path, satin=True, rgb=border.color,
+                     spacing=None, width_px=wpx, closed=closed)
+            o["index"] = len(objs)
+            # model the border as its actual stroke (wpx wide, centred on the ring
+            # midline contour, so it covers the carved ring)
+            bim = Image.new("I", (W, H), -1)
+            ring_pts = [(float(x), float(y)) for y, x in poly]
+            if closed:
+                ring_pts = ring_pts + ring_pts[:1]
+            ImageDraw.Draw(bim).line(ring_pts, fill=o["index"],
+                                     width=max(1, int(round(wpx))), joint="curve")
+            stitch_index = np.maximum(stitch_index, np.array(bim, dtype=np.int32))
+            objs.append(o)
+            needle = (float(poly[-1, 0]), float(poly[-1, 1]))
+
+    if border.first:            # circle ring sewn first: the art crosses over it
+        add_border_satins()
+
     for c in fill_colors:
         for o in nn_sort(color_items[c], needle):
             o["group_id"] = "color%d" % layer_no
@@ -1515,23 +1868,8 @@ def order_objects(img, scale, palette, fill_colors, color_items, color_keep_lab,
         stitch_index = np.maximum(stitch_index, np.array(satin_img, dtype=np.int32))
         layer_no += 1
 
-    for d_path, poly, wpx, closed in zip(border.paths, border.pts_list,
-                                          border.widths, border.closed):
-        o = dict(group_id="border", group_label="Border",
-                 cent=(float(poly[:, 0].mean()), float(poly[:, 1].mean())),
-                 pts=poly, d=d_path, satin=True, rgb=border.color,
-                 spacing=None, width_px=wpx, closed=closed)
-        o["index"] = len(objs)
-        # model the border as its actual stroke (wpx wide, centred on the ring
-        # midline contour, so it covers the carved ring)
-        bim = Image.new("I", (W, H), -1)
-        ring_pts = [(float(x), float(y)) for y, x in poly]
-        if closed:
-            ring_pts = ring_pts + ring_pts[:1]
-        ImageDraw.Draw(bim).line(ring_pts, fill=o["index"],
-                                 width=max(1, int(round(wpx))), joint="curve")
-        stitch_index = np.maximum(stitch_index, np.array(bim, dtype=np.int32))
-        objs.append(o)
+    if not border.first:
+        add_border_satins()
 
     # running-stitch outlines along tiny/thin parts (review.md 2.6.4b): same
     # border colour, same layer, stitched after the border satins
@@ -1630,7 +1968,7 @@ def plan_trims(img, scale, objs, stitch_index, settings):
 
 
 def el(id_, fill_rgb, d, settings, spacing=None, trim_after=False, angle=None,
-       gradient_id=None):
+       gradient_id=None, small=False, cut=False):
     hx = "#%02x%02x%02x" % tuple(int(v) for v in fill_rgb)
     fill_css = f"url(#{gradient_id})" if gradient_id else hx
     method = 'inkstitch:fill_method="linear_gradient_fill" ' if gradient_id else ""
@@ -1647,6 +1985,13 @@ def el(id_, fill_rgb, d, settings, spacing=None, trim_after=False, angle=None,
         if _l > settings.fill_underlay_light_l:
             _a = angle if angle is not None else 0.0
             underlay += f'inkstitch:fill_underlay_angle="{_a + 90:g} {_a:g}" '
+    if small:
+        # ADR 0003: a component this small cannot carry an underlay plus tie locks
+        # without packing the needle; Ink/Stitch has no small-shape exemption.
+        # The ties stay when a cut touches the fill: Ink/Stitch adds locks only
+        # after a trim or a long jump, and ties="3" removes even those, which
+        # leaves the cut tail unlocked (lib/elements/element.py lock_stitches)
+        underlay = 'inkstitch:fill_underlay="false" ' + ("" if cut else 'inkstitch:ties="3" ')
     # Pin the params the legacy version-0 update used to inject, so a version-4
     # file stitches the same tatami rows: 3 mm max stitch (samples sew 3.0 mm)
     # and 1.5 mm travel between fill rows.
@@ -1690,6 +2035,12 @@ def run_el(id_, stroke_rgb, d, trim_after=False):
             f'{trim}d="{d}"/>')
 
 
+def _thread(rgb, settings):
+    """The thread colour a source colour is stitched in (YAML ``threads:``)."""
+    hx = settings.thread_map.get(hexkey(rgb).lower())
+    return (int(hx[1:3], 16), int(hx[3:5], 16), int(hx[5:7], 16)) if hx else rgb
+
+
 def emit_svg(out, objs, trim_after, img, scale, settings):
     """Write the Ink/Stitch SVG.
 
@@ -1729,34 +2080,42 @@ def emit_svg(out, objs, trim_after, img, scale, settings):
                      f'x1="{gr["p1"][0]:.2f}" y1="{gr["p1"][1]:.2f}" '
                      f'x2="{gr["p2"][0]:.2f}" y2="{gr["p2"][1]:.2f}">\n')
             for off, rgb in zip(gr["offsets"], gr["stops"]):
+                rgb = _thread(rgb, settings)
                 p.append(f'      <stop offset="{off:.4f}" style="stop-color:'
                          f'#{int(rgb[0]):02x}{int(rgb[1]):02x}{int(rgb[2]):02x};stop-opacity:1"/>\n')
             p.append("    </linearGradient>\n")
         p.append("  </defs>\n")
     idx = 0
     current_group = None
+    prev_tm, prev_rgb = True, None          # the first object starts after a cut
     for o, tm in zip(objs, trim_after):
+        # a cut or a colour change on either side: the fill's locks hold the thread
+        cut = tm or prev_tm or prev_rgb is None or hexkey(o["rgb"]) != hexkey(prev_rgb)
+        prev_tm, prev_rgb = tm, o["rgb"]
         if o["group_id"] != current_group:
             if current_group is not None:
                 p.append('  </g>\n')
             p.append(f'  <g inkscape:label="{o["group_label"]}" inkscape:groupmode="layer" '
                      f'id="{o["group_id"]}">\n')
             current_group = o["group_id"]
+        rgb = _thread(o["rgb"], settings)
         if o["satin"]:
             gid = o["group_id"]
-            underlay = settings.satin_underlay and gid in ("outlines", "border")
+            underlay = ((settings.satin_underlay and gid in ("outlines", "border"))
+                        or (settings.border_underlay and gid == "border"))
             zigzag = (settings.border_zigzag_spacing_mm if gid == "border"
                       else settings.outline_zigzag_spacing_mm if gid == "outlines" else None)
-            p.append("    " + satin_el(f"s{idx}", o["rgb"], o["d"], o["width_px"],
+            p.append("    " + satin_el(f"s{idx}", rgb, o["d"], o["width_px"],
                                        scale, settings, trim_after=tm,
                                        underlay=underlay, zigzag_mm=zigzag,
                                        border=(gid == "border")) + "\n")
         elif o.get("stroke"):
-            p.append("    " + run_el(f"r{idx}", o["rgb"], o["d"], trim_after=tm) + "\n")
+            p.append("    " + run_el(f"r{idx}", rgb, o["d"], trim_after=tm) + "\n")
         else:
-            p.append("    " + el(f"f{idx}", o["rgb"], o["d"], settings, spacing=o["spacing"],
+            p.append("    " + el(f"f{idx}", rgb, o["d"], settings, spacing=o["spacing"],
                                   trim_after=tm, angle=o.get("angle"),
-                                  gradient_id=f"g{idx}" if o.get("gradient") else None) + "\n")
+                                  gradient_id=f"g{idx}" if o.get("gradient") else None,
+                                  small=o.get("small", False), cut=cut) + "\n")
         idx += 1
     if current_group is not None:
         p.append('  </g>\n')
@@ -1766,11 +2125,14 @@ def emit_svg(out, objs, trim_after, img, scale, settings):
         f.write("".join(p))
 
 
-def write_preview(out, img, palette):
-    """Posterized preview PNG next to the SVG (for review)."""
+def write_preview(out, img, palette, settings=None):
+    """Posterized preview PNG next to the SVG (for review), in thread colours."""
     preview = np.full((img.H, img.W, 3), 255, dtype=np.uint8)
     view = palette.label_all[img.silhouette]
-    preview[img.silhouette] = palette.centroids[view]
+    cen = palette.centroids
+    if settings is not None and settings.thread_map:
+        cen = np.array([_thread(c, settings) for c in cen], dtype=np.uint8)
+    preview[img.silhouette] = cen[view]
     if img.has_transparency:
         alpha8 = np.where(img.silhouette, 255, 0).astype(np.uint8)
         prev = np.dstack([preview, alpha8])
@@ -1793,7 +2155,10 @@ def main(argv=None):
     scale = design_scale(img, settings)
     border = detect_border(img, scale, settings)
     palette = build_palette(img, scale, border, settings)
+    clean_labels(img, scale, palette, settings)
     fill_colors, lw = order_colors(palette, settings)
+    if border.circle is not None:
+        circle_ring(img, scale, palette, border, fill_colors, settings)
     masks = build_masks(img, border, palette, fill_colors, lw, settings)
     outline_items, lw_cover = outline_satins(img, scale, masks, palette, lw, settings)
     masks = compensate_masks(masks, img, scale, border, palette, fill_colors,
@@ -1809,7 +2174,7 @@ def main(argv=None):
 
     trim_after, n_trims = plan_trims(img, scale, objs, stitch_index, settings)
     emit_svg(out, objs, trim_after, img, scale, settings)
-    write_preview(out, img, palette)
+    write_preview(out, img, palette, settings)
     print(f"\nwrote {out}")
 
 

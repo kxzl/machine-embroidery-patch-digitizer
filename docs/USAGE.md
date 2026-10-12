@@ -148,7 +148,9 @@ put on `PYTHONPATH` automatically by `run.sh` for the Ink/Stitch export step.
 | `--no-trim` | off | Trimming is **on by default**; this disables it. |
 | `--trim` | on | Explicitly enable trimming (already the default; also overrides `trim.enabled: false` in a YAML config). |
 | `--trim-mm N` | `4.0` | Cut a jump longer than this (mm); `0` = cut every long/exposed jump. A jump is skipped only when both its nearest-boundary distance and its worst one-sided travel are under the threshold; jumps under 2 mm are always skipped. The last object of every layer is trimmed when the next object is farther than 2 mm. |
-| `--config F` | none | Per-image YAML config (`order`, `skip_colors`, `density`, `angle`, `border`, `trim`, `palette`, `palette_mode`, `profile`, `underlap_mm`, `raster_pull_mm`, `fill_underlay_skip_last`, `fill_underlay_double`, `satin_underlay`, `border_zigzag_spacing_mm`, `fabric_color`). CLI flags win over its values. Generate a starter with `tools/digitize/make_config.py <image>`, which also parses the `**Palette:**` line from `patch_descriptions/prompts/<name>.md` into `palette:` when one exists. |
+| `--no-travel-under` | off | `run.sh` only: keep every same-colour trim as a cut. By default `travel_vp3.py` turns a trim between two objects of one colour into a running stitch under later stitching when it can. Not forwarded to `vectorize.py`. |
+| `--travel-max-mm N` | `60` | `run.sh` only: the longest run (mm) `travel_vp3.py` sews instead of cutting. Longer routes stay cuts. |
+| `--config F` | none | Per-image YAML config (`order`, `skip_colors`, `density`, `angle`, `border`, `trim`, `travel`, `palette`, `palette_mode`, `profile`, `underlap_mm`, `raster_pull_mm`, `fill_underlay_skip_last`, `fill_underlay_double`, `satin_underlay`, `border_zigzag_spacing_mm`, `fabric_color`, `cleanup`, `threads`). CLI flags win over its values. Generate a starter with `tools/digitize/make_config.py <image>`, which also parses the `**Palette:**` line from `patch_descriptions/prompts/<name>.md` into `palette:` when one exists. |
 | `--no-export` | off | `run.sh` only: stop after writing the SVG, skip the Ink/Stitch VP3 export. Not forwarded to `vectorize.py`. |
 | (positional) input | — | Path to the source image (`.webp`/`.png`/`.jpg`). |
 | (positional) output | `work/design.svg` | Output SVG path. |
@@ -239,6 +241,20 @@ tools/digitize/run.sh --profile vadmel --density 0.4 --config work/example.yaml 
   `max_stitch_length_mm="7"`, which inset the crossed stitches and split the long
   cross-stitches where the border fans at a tight tip (a horn/claw point) instead
   of leaving a long bar of thread.
+- **Circle ring.** `mode: circle` fits a circle to the patch's outer edge (rays
+  that break out, such as horns or a beard, stay out of the fit) and stitches a
+  satin ring `thickness_mm` wide whose outer edge is that circle. Everything the
+  art draws in the ring band or outside the circle is removed (its own thin rim,
+  edge chips), except shapes that cross the circle: those are found by angle and
+  kept. Keys:
+  - `color: '#rrggbb'`: the ring's source colour (mapped through `threads:`).
+    Default: the darkest stitched colour.
+  - `order: first` sews the ring as one closed satin before the fills, so the
+    crossing shapes lie on top of it. `order: last` (default) sews it on top and,
+    with `gaps: true` (default), stops it 1 mm short of each crossing shape, so
+    it is cut into arcs with a trim between them.
+  - `underlay: true` adds centre-walk and contour underlay to the ring (wide
+    rings want it).
 
 ---
 
@@ -314,6 +330,9 @@ border:
 trim:
   enabled: true
   threshold_mm: 4.0
+travel:              # travel_vp3.py: same-colour trims become runs under later stitching
+  enabled: true
+  max_mm: 60
 ```
 
 ---
@@ -370,7 +389,9 @@ These live at the top of `tools/digitize/vectorize.py` and are not CLI flags
    distance **and** its worst one-sided travel are under the threshold, so a fill
    whose row end sits close to the next shape but whose row start is far away is
    still cut. The last object of every layer (each colour, the outlines, the
-   border) is always trimmed when the next object is farther than 2 mm.
+   border) is always trimmed when the next object is farther than 2 mm. After the
+   export, `travel_vp3.py` turns the same-colour trims into runs where it can (see
+   Travel under).
 7. **Emit Ink/Stitch SVG** with per-object params: `row_spacing_mm` (density),
    `trim_after`, and `satin_column` for outlines and border. The file carries
    `inkstitch_svg_version` 4 metadata and pins `max_stitch_length_mm="3"` /
@@ -404,7 +425,9 @@ border satin.
 - **Trimming is on by default** and cuts long *and* exposed jumps (thread not
   covered by a later layer). Jumps under 2 mm are never cut. It adds tie-off/tie-in
   lock stitches (a few % more stitches) but eliminates visible jump thread.
-  Use `--no-trim` to disable.
+  Use `--no-trim` to disable. Trims between two objects of one colour are then
+  replaced by a hidden run where possible (Travel under), so the machine cuts
+  less.
 - **Density**: `0.4 mm` default; the script warns outside `0.3–0.6 mm`. Per-colour
   overrides go in the YAML `density:` map. A density given on the command line or
   in the YAML *overrides* the `row_spacing_mm` authored on the artwork; with no
@@ -459,6 +482,48 @@ gradients:
 Use `run` for detailed AI-made art with hairline outlines: the widened satins
 pile up where lines meet.
 
+### Small detail (`cleanup:` YAML)
+
+Every connected island of a colour is its own object, with its own lock stitches
+and usually a trim. `cleanup:` merges detail below the art's detail limit into the
+nearest colour before anything is traced. Without the key the output is unchanged.
+
+```yaml
+cleanup:
+  min_width_mm: 1.0          # stitched parts thinner than this join their neighbour
+  min_area_mm2: 3.0          # stitched islands smaller than this join their neighbour
+  fabric_min_width_mm: 1.2   # skipped colours (fabric showing through), see below
+  fabric_min_area_mm2: 1.0
+```
+
+The `fabric_*` values apply to `skip_colors`. A fabric spot inside a fill is only a
+hole and costs no trim, so it can stay small. A thin fabric line is filled in only
+when one stitched colour alone lies next to it: a line that splits one colour into
+two islands closes, while a keyline between two different colours or along the
+patch edge stays. Midnight Epicure (`patch_descriptions/epicure_green.yaml`):
+islands 79 -> 43, trims 45 -> 31, both eyes kept.
+
+### Thread colours (`threads:` YAML)
+
+`threads:` maps a source colour to the thread colour written to the SVG and VP3.
+Segmentation, `order`, `skip_colors`, `density` and `angle` keep using the source
+hexes. The posterized preview shows the thread colours.
+
+```yaml
+threads:
+  '#4a4947': '#1f5e2b'
+  '#93928e': '#6cbf3f'
+```
+
+### Small fills (ADR 0003)
+
+A fill smaller than 2.5 mm² or thinner than 1 mm (largest inscribed circle) is
+emitted with `fill_underlay="false"`, as `svg_digitize.py` already does: an underlay
+on a speck packs the needle. It also gets `ties="3"` (no lock stitches), but only
+when no trim and no colour change touches it. Ink/Stitch adds locks only around a
+cut or a long jump, and `ties="3"` would remove those too and leave the cut tail
+unlocked. Always on.
+
 ### Keep enclosed background (`--keep-enclosed`)
 
 `--keep-enclosed` is a `run.sh` flag and is used together with
@@ -490,6 +555,82 @@ It reports:
 
 Each warning lists up to 5 spots in mm from the top-left of the design. Many
 trims and many colour changes make the machine stop often.
+
+### Travel under (no cut between same-colour objects)
+
+A cut costs the machine time, leaves a thread tail and is a chance for a thread
+break or a bird's nest. When two fill regions of one colour are joined by a trim
+and later stitching (a fill or satin of another colour, an outline or the border)
+will be sewn over the way between them, the needle can run there instead.
+`tools/digitize/travel_vp3.py` does this on the VP3. `run.sh` calls it before
+`trim_vp3.py`, and it is on by default.
+
+For each trim followed by a stitch in the same colour block it:
+
+1. takes the exact exit and entry points from the file;
+2. removes the trim outright when they are `trim.min_mm` or less apart (default
+   2 mm), with no run and no cover needed;
+3. draws everything sewn after the trim on a 0.2 mm grid, closes the gaps between
+   fill rows and keeps the cells at least 0.5 mm inside that cover. A single
+   thread, a long travel stitch or a thin outline is not cover;
+4. ignores cover that is lighter than the travel thread (by more than 15 L*),
+   so a dark run never sits under a light fill it would show through;
+5. finds the shortest route through that cover. A connector of at most 1.5 mm
+   joins the exit and the entry to it, because the exit is on the edge of the
+   object just sewn;
+6. replaces the trim with stitches of at most 2.5 mm along the route, never closer
+   than about 0.35 mm to uncovered cloth. The trim stays when there is no route, the
+   route is longer than 60 mm, or the exit or entry is not near cover.
+
+Trims at colour changes and at the end of the file are the machine's and are not
+touched. Ink/Stitch's lock stitches around the old trim stay in the file.
+
+```bash
+.venv/bin/python tools/digitize/travel_vp3.py <file.vp3> [--max-mm N] [--snap-mm N] \
+  [--margin-mm N] [--stitch-mm N] [--hop-mm N] [--surface later|same_colour] \
+  [--config F] [--dry-run]
+```
+
+It prints how many trims became runs, how many short hops lost their trim, and why
+the others stayed, for example `kept: 129 exit not under cover, 40 no route under
+cover`. Typical reasons for a kept trim: the edge of the fill touches an earlier,
+lighter colour and nothing is sewn over it, or the only thing sewn later is a thin
+line that is not wide enough to hide a run.
+
+Config (all optional; flags win):
+
+```yaml
+travel:
+  enabled: true      # false keeps every same-colour trim as a cut
+  max_mm: 60         # longest run sewn instead of a cut
+  margin_mm: 0.5     # how far inside the cover the run stays
+  stitch_mm: 2.5     # longest run stitch (Ink/Stitch's running stitch default)
+  snap_mm: 1.5       # longest straight connector from the exit/entry to the cover
+  surface: later     # 'same_colour' also lets a run lie on earlier stitching of its own colour
+trim:
+  min_mm: 2          # a trim between points this close is dropped
+```
+
+`surface: same_colour` is off by default. A black run on top of black outline satin
+should not show, but it has not been sewn and checked on fabric yet. On the Bomb,
+Book Burner and Goat exports it adds 9, 14 and 14 runs to the 50, 38 and 27 of the
+default.
+
+`--no-travel-under` on `run.sh` switches the pass off for one run. Check the result
+with `qa/travelmap.py` (trimmed travel is cyan) and `qa/jam_check.py` (trim
+clusters). Same exports with the pass off and on, after `trim_vp3.py`:
+
+| Design | Trims off | Trims on | Short hops dropped | Runs |
+|---|---|---|---|---|
+| Bomb `bomb_web_2` (calibration patch, 90 mm) | 46 | 16 | 6 | 24 |
+| Bomb, default settings | 318 | 182 | 86 | 50 |
+| Book Burner | 158 | 82 | 38 | 38 |
+| Goat | 93 | 38 | 28 | 27 |
+| Earth | 41 | 4 | 7 | 31 |
+
+Exposed travel stays 0 on all five. The longest run stitch is 2.8 mm. A trim dropped as a short hop leaves a sewn stitch of at most 2 mm; that is below the 4.5 mm travel map threshold, so the 0 does not cover it. On an SVG-input file (Scavenger's Daughter) trims go from 68 to 24. Sew a test
+piece before relying on it for a new fabric: the runs are under the fill by design,
+but a very sparse fill or a pale fill over dark thread can show them.
 
 ### Satin precheck
 
