@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Digitize Patch: Slice and Stitch plan</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <h1>Digitize Patch</h1>
+  <nav class="tabs" id="tabs">
+    <button type="button" class="tab active" id="tab-btn-regionmap" data-tab="regionmap">Region map</button>
+    <button type="button" class="tab" id="tab-btn-stitchplan" data-tab="stitchplan">Stitch plan</button>
+  </nav>
+  <button type="button" class="ghost" id="btn-fit" title="Fit the Region map view to the pane">Fit</button>
+</header>
+
+<main class="layout">
+
+  <aside class="sidebar">
+
+    <section class="panel">
+      <h2>Picture</h2>
+      <input type="file" id="in-picture" accept=".png,.jpg,.jpeg,.webp">
+      <label class="check hidden" id="label-keybg">
+        <input type="checkbox" id="in-keybg" checked> Remove plain background first
+      </label>
+      <p class="hint" id="picture-note"></p>
+      <ul class="advice" id="picture-advice"></ul>
+    </section>
+
+    <section class="panel">
+      <h2>Settings</h2>
+
+      <span class="field-label">Hoop</span>
+      <div class="radios" id="hoop-radios"></div>
+
+      <span class="field-label">Patch size</span>
+      <div class="row">
+        <input type="number" id="in-size" min="1" max="400" step="1">
+        <span class="unit">mm</span>
+      </div>
+      <label class="check"><input type="checkbox" id="in-fill-hoop"> Fill the hoop</label>
+
+      <span class="field-label">Colours</span>
+      <div class="radios" id="color-radios"></div>
+      <p class="hint hidden" id="palette-note">Colours come from the YAML palette</p>
+    </section>
+
+    <section class="panel">
+      <h2>Config</h2>
+      <input type="file" id="in-yaml" accept=".yaml,.yml">
+      <p class="hint" id="yaml-note">No config loaded</p>
+      <button type="button" class="ghost wide" id="btn-clear-config">Clear config</button>
+    </section>
+
+    <section class="panel">
+      <h2>Actions</h2>
+      <button type="button" id="btn-slice">Slice</button>
+      <button type="button" id="btn-stitchplan">Make stitch plan</button>
+      <button type="button" class="ghost" id="btn-cancel" disabled>Cancel</button>
+    </section>
+
+    <section class="panel">
+      <h2>Progress</h2>
+      <p class="progress-line"><span id="prog-state">idle</span></p>
+      <p class="progress-line" id="prog-stage"></p>
+      <p class="progress-line" id="prog-elapsed"></p>
+      <p class="error hidden" id="prog-error"></p>
+      <details id="log-details">
+        <summary>Log</summary>
+        <pre id="prog-log"></pre>
+      </details>
+    </section>
+
+    <section class="panel">
+      <h2>Overrides</h2>
+      <p class="hint hidden" id="stale-note">Region map is stale, press Slice</p>
+      <div id="override-list"></div>
+      <p class="hint empty" id="override-empty">No overrides. Click a Region in the Region map.</p>
+    </section>
+
+  </aside>
+
+  <section class="stage">
+
+    <div class="view" id="view-regionmap">
+      <div class="panes" id="panes">
+        <div class="pane">
+          <div class="pane-title">Picture</div>
+          <div class="viewport" id="viewport-picture">
+            <div class="content" id="content-picture">
+              <p class="placeholder">No picture yet</p>
+            </div>
+          </div>
+        </div>
+        <div class="pane">
+          <div class="pane-title">Region map</div>
+          <div class="viewport" id="viewport-regionmap">
+            <div class="content" id="content-regionmap">
+              <p class="placeholder">No Slice yet</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="hint pane-hint">Wheel zooms around the cursor, drag pans, both panes move together.
+        Click a Region to set it to Fill or Satin.</p>
+    </div>
+
+    <div class="view hidden" id="view-stitchplan">
+      <div class="plan">
+        <div class="plan-images">
+          <div class="plan-switch" id="plan-switch">
+            <button type="button" class="tab active" data-plan="stitchplan">Stitch plan</button>
+            <button type="button" class="tab" data-plan="coverage">Coverage</button>
+          </div>
+          <div class="plan-image" id="plan-image">
+            <p class="placeholder">No stitch plan yet</p>
+          </div>
+        </div>
+        <div class="plan-facts">
+          <p class="hint stale hidden" id="plan-stale">This stitch plan belongs to an older Slice</p>
+          <table class="facts">
+            <tbody id="plan-numbers"></tbody>
+          </table>
+          <div id="plan-warnings"></div>
+          <div id="plan-removed"></div>
+          <p id="plan-download"></p>
+        </div>
+      </div>
+      <p class="hint pane-hint">The stitch plan has its own scale and is not synced with the Region map.</p>
+    </div>
+
+    <div class="popover hidden" id="popover">
+      <p class="popover-at" id="popover-at"></p>
+      <div class="popover-actions">
+        <button type="button" id="pop-fill">Fill</button>
+        <button type="button" id="pop-satin">Satin</button>
+        <button type="button" class="ghost" id="pop-clear">Clear</button>
+      </div>
+    </div>
+
+  </section>
+
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
