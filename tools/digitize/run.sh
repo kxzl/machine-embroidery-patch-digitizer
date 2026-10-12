@@ -17,6 +17,9 @@
 #                   underlap 0.6, raster pull 0.25, full/satin underlay)
 #   --background HEX  (preview canvas colour; default: --config's fabric_color:,
 #                      else the profile's, else white)
+#   --no-travel-under | --travel-max-mm N  (travel_vp3.py: a same-colour trim becomes a
+#                   running stitch under later stitching instead of a cut; default on,
+#                   runs up to 60 mm; --config's travel: section works too)
 #   --no-export   (skip the Ink/Stitch VP3 export, produce SVG only)
 set -euo pipefail
 
@@ -27,6 +30,8 @@ KEY_BG=0
 KEEP_ENCLOSED=""
 BACKGROUND=""
 CONFIG=""
+NO_TRAVEL=0
+TRAVEL_ARGS=()
 while [[ $# -gt 0 ]]; do
   a="$1"; shift
   case "$a" in
@@ -43,6 +48,9 @@ while [[ $# -gt 0 ]]; do
     --key-background) KEY_BG=1 ;;
     --keep-enclosed) KEEP_ENCLOSED="--keep-enclosed" ;;
     --no-export) NO_EXPORT=1 ;;
+    --no-travel-under) NO_TRAVEL=1 ;;
+    --travel-max-mm) TRAVEL_ARGS+=(--max-mm "$1"); shift ;;
+    --travel-max-mm=*) TRAVEL_ARGS+=(--max-mm "${a#*=}") ;;
     -*) FLAGS+=("$a") ;;
     *) IMG="$a" ;;
   esac
@@ -167,6 +175,11 @@ print(f"  threads: {threads}")
 PYEOF
 
 echo "== stitch plan"
+# same-colour trims become a run under later stitching; trim_vp3 then cuts what is left
+if [[ "$NO_TRAVEL" != "1" ]]; then
+  .venv/bin/python tools/digitize/travel_vp3.py "output_vp3/$BASE.vp3" \
+    ${CONFIG:+--config "$CONFIG"} "${TRAVEL_ARGS[@]}"
+fi
 .venv/bin/python tools/digitize/trim_vp3.py "output_vp3/$BASE.vp3" 8
 # two renders: hairlines show the individual stitches (layout check), thread
 # width shows what the fabric will actually look like (coverage check).  At
