@@ -20,6 +20,8 @@ from skimage import measure, morphology
 
 _NEIGHBORS = ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1))
 _FREE_END_CLIP_MM = 0.3            # a free end may leave the mask by at most this
+_TAPER_WIDTH_JUMP_MM = 0.6         # pieces this close in width stay one satin
+_TAPER_MIN_RUN_MM = 2.5            # a piece shorter than this is merged away
 
 
 def trace_skeleton(skel, robust=False):
@@ -140,7 +142,7 @@ def _extend_ends(chains, dist, junctions, free_ext, clip, out_dist):
 
 
 def satin_segments(thin, px_per_mm, min_len_mm, wmin_mm, wmax_mm, tolerance,
-                   extend_ends=False, free_ext_mm=0.3, raw_widths=False):
+                   extend_ends=False, free_ext_mm=0.3, raw_widths=False, taper_mm=0.0):
     """Skeletonize a mask into (path_d, point_array, width_px) satin candidates.
 
     Segments whose own median width exceeds ``wmax_mm`` are the cores of solid
@@ -153,6 +155,11 @@ def satin_segments(thin, px_per_mm, min_len_mm, wmin_mm, wmax_mm, tolerance,
 
     With ``raw_widths`` each result is a 4-tuple ``(path_d, points, width_px, raw_px)``
     where ``raw_px`` is the measured width before widening to ``wmin_mm``.
+
+    ``taper_mm`` splits each run into pieces about that long, each with the width
+    its own stretch of line measures, so a satin follows the line as it thickens
+    and thins (a sword blade) instead of taking one median width for the whole
+    run.  0 (the default) keeps one width per run.
     """
     skel = morphology.skeletonize(thin)
     dist = ndimage.distance_transform_edt(thin)
@@ -187,9 +194,13 @@ def satin_segments(thin, px_per_mm, min_len_mm, wmin_mm, wmax_mm, tolerance,
             _extend_ends([c for c, _ in kept], dist, junctions, free_ext, clip, out_dist),
             [w for _, w in kept]))
 
+    if taper_mm > 0:
+        kept = _taper([(np.asarray(p, dtype=float), w) for p, w in kept],
+                      dist, taper_mm * px_per_mm, wmin, wmax, px_per_mm)
+
     segs = []
-    for path, w_raw in kept:
-        arr = np.asarray(path, dtype=float)
+    for arr, w_raw in kept:
+        arr = np.asarray(arr, dtype=float)
         poly = measure.approximate_polygon(arr, tolerance=max(1.0, tolerance))
         if len(poly) < 2:
             poly = arr
@@ -197,6 +208,68 @@ def satin_segments(thin, px_per_mm, min_len_mm, wmin_mm, wmax_mm, tolerance,
         d = "M " + " L ".join(f"{x:.1f},{y:.1f}" for y, x in poly)
         segs.append((d, poly, w, w_raw) if raw_widths else (d, poly, w))
     return segs
+
+
+def _taper(runs, dist, chunk_px, wmin, wmax, px_per_mm):
+    """Split each run into ~chunk_px pieces, each with the width it measures.
+
+    A piece takes p95 of the distance transform over its own stretch of line, so a
+    piece running along a flare is wider than the one before it.  Neighbouring
+    pieces whose widths agree stay one piece (a constant-width line still gives
+    one satin, not twenty), and a piece too short to be a satin on its own is
+    merged into its neighbour.  Returns [(points, width_px)].
+    """
+    jump = _TAPER_WIDTH_JUMP_MM * px_per_mm
+    min_run = _TAPER_MIN_RUN_MM * px_per_mm
+    out = []
+    for arr, _w_run in runs:
+        total = float(np.hypot(*np.diff(arr, axis=0).T).sum())
+        n = max(1, int(round(total / chunk_px))) if total > 0 else 1
+        pieces = []                      # [indices, length, width]
+        for c in range(n):
+            a = int(round(c * len(arr) / n))
+            b = min(len(arr) - 1, int(round((c + 1) * len(arr) / n)))
+            idxs = list(range(a, b + 1))
+            if len(idxs) < 2:
+                continue
+            ys = arr[idxs][:, 0].astype(int)
+            xs = arr[idxs][:, 1].astype(int)
+            w = 2.0 * float(np.percentile(dist[ys, xs], 95))
+            length = float(np.hypot(*np.diff(arr[idxs], axis=0).T).sum())
+            if pieces and abs(pieces[-1][2] - w) <= jump:
+                pieces[-1][0] += idxs[1:]
+                pieces[-1][1] += length
+                pieces[-1][2] = (pieces[-1][2] + w) / 2.0
+            else:
+                pieces.append([idxs, length, w])
+        changed = True
+        while changed and len(pieces) > 1:
+            changed = False
+            for i, p in enumerate(pieces):
+                if p[1] >= min_run:
+                    continue
+                left, right = pieces[i - 1] if i else None, pieces[i + 1] if i + 1 < len(pieces) else None
+                if left is None and right is None:
+                    continue
+                if right is None or (left is not None
+                                     and abs(left[2] - p[2]) <= abs(right[2] - p[2])):
+                    left[0] += p[0][1:]
+                    left[1] += p[1]
+                    left[2] = (left[2] + p[2]) / 2.0
+                else:
+                    right[0] = p[0][:-1] + right[0]
+                    right[1] += p[1]
+                    right[2] = (right[2] + p[2]) / 2.0
+                pieces.pop(i)
+                changed = True
+                break
+        for idxs, _length, w in pieces:
+            piece = arr[idxs]
+            if len(piece) >= 2:
+                # the measured width, capped at the run's ceiling; the satin floor
+                # is applied by the caller, so a tip can still narrow below it
+                out.append((piece, float(np.clip(w, 0.0, wmax))))
+    return out
 
 
 def demo():
@@ -249,6 +322,25 @@ def demo():
     wide = satin_segments(bar, extend_ends=True, free_ext_mm=0.3, **bkw)
     grow = left_x(tight) - left_x(wide)
     assert abs(grow - 0.3 * 7.0) < 1.0, grow
+
+    # taper: a wedge (narrow at one end, wide at the other) comes out as several
+    # satins of different widths, where one median width would be right nowhere
+    wedge = np.zeros((80, 80), bool)
+    for x in range(10, 70):
+        half = 1 + (x - 10) * 9 // 60
+        wedge[40 - half:40 + half, x] = True
+    wkw = dict(px_per_mm=7.0, min_len_mm=1.0, wmin_mm=0.6, wmax_mm=9.0,
+               tolerance=0.5, extend_ends=False)
+    flat = satin_segments(wedge, **wkw)
+    tapered = satin_segments(wedge, taper_mm=2.0, **wkw)
+    assert len(flat) == 1, flat
+    assert len(tapered) > 1, tapered
+    widths = sorted(w / 7.0 for _, _, w in tapered)
+    assert widths[-1] - widths[0] > 1.0, widths       # the wedge really tapers
+    # the pieces tile the run: one ends where the next begins
+    spans = sorted((min(p[1] for p in poly), max(p[1] for p in poly))
+                   for _, poly, _ in tapered)
+    assert all(abs(a[1] - b[0]) <= 1 for a, b in zip(spans, spans[1:])), spans
 
     print("skeleton.py: all checks passed")
 
