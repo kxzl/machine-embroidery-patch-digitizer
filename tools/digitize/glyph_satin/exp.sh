@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # exp.sh <svg> : Ink/Stitch -> vp3 + trim + previews, next to the svg.
 set -euo pipefail
-R=/home/roman/git/Digitize_patches
+R="$(cd "$(dirname "$0")/../../.." && pwd)"
 S="$1"; B="${S%.svg}"
 cd "$R"
 PYTHONPATH=tools/wxstub INKSTITCH_OFFLINE_SCRIPT=true timeout 900 .venv/bin/python inkstitch/inkstitch.py --extension=zip --format-vp3=True "$S" > "$B.zip" 2>"$B.err" || { echo FAIL; tail -20 "$B.err"; exit 1; }

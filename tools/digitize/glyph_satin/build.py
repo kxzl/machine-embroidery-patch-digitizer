@@ -1,11 +1,11 @@
 """Desperado Club digitizer: components -> satin columns (rails + rungs) -> Ink/Stitch SVG."""
-import math, pickle, sys, json
+import math, os, pickle, sys, json
 import numpy as np
 from shapely.geometry import Point, Polygon, LineString
 from shapely.ops import unary_union
 from geom import *
 
-REPO = "/home/roman/git/Digitize_patches"
+REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
 JPG = REPO + "/input/desperado_club.jpg"
 OLD_SVG = REPO + "/output_inkstitch_svg/desperado_club.svg"
 PX_MM = PPM

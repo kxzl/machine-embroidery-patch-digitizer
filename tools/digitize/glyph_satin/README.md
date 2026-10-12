@@ -2,7 +2,7 @@
 
 Per-stroke satin digitizer used for the Desperado Club patch (all white parts satin, black is bare fabric).
 It replaces the general skeleton and rail-satin path of `vectorize.py` for this one design.
-The code is a prototype: paths in `build.py` and `exp.sh` are absolute, and the design layout is hard-coded in `classify()`.
+The code is a prototype: `build.py` reads `input/desperado_club.jpg` from the repo root, and the design layout is hard-coded in `classify()`.
 
 ## How it works
 
