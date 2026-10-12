@@ -2,15 +2,17 @@
 # Export one Ink/Stitch SVG to a VP3 machine file and the two preview PNGs.
 #
 # Usage: tools/digitize/export_svg.sh <svg> <out_prefix> [--background HEX] [--config F]
-#                                     [--no-travel-under | --travel-max-mm N]
+#                                     [--no-travel-under | --travel-max-mm N] [--work-dir DIR]
 #   <svg>          the Slice's SVG. The satin precheck may fix it in place.
 #   <out_prefix>   writes <out_prefix>.vp3, <out_prefix>_stitchplan.png,
 #                  <out_prefix>_coverage.png, <out_prefix>.zip and <out_prefix>.err
 #   --background HEX  preview canvas colour; run.sh works it out from the config
 #   --config F     the per-image YAML; travel_vp3.py reads its travel: section
 #   --no-travel-under | --travel-max-mm N  same as run.sh (travel_vp3.py)
+#   --work-dir DIR  write the .zip and .err into DIR instead (run.sh uses work/)
 #
-# It echoes the same "== ..." stage lines as run.sh, so the caller can follow along.
+# run.sh calls this for its export. It echoes the "== ..." stage lines the wizard
+# and the web UI follow.
 # No timeout: Cancel stops it (qa/export.sh's timeout 1800 would kill a long cold export).
 set -euo pipefail
 
@@ -20,6 +22,7 @@ BACKGROUND=""
 CONFIG=""
 NO_TRAVEL=0
 TRAVEL_ARGS=()
+WORK=""
 while [[ $# -gt 0 ]]; do
   a="$1"; shift
   case "$a" in
@@ -27,6 +30,8 @@ while [[ $# -gt 0 ]]; do
     --background=*) BACKGROUND="${a#*=}" ;;
     --config) CONFIG="$1"; shift ;;
     --config=*) CONFIG="${a#*=}" ;;
+    --work-dir) WORK="$1"; shift ;;
+    --work-dir=*) WORK="${a#*=}" ;;
     --no-travel-under) NO_TRAVEL=1 ;;
     --travel-max-mm) TRAVEL_ARGS+=(--max-mm "$1"); shift ;;
     --travel-max-mm=*) TRAVEL_ARGS+=(--max-mm "${a#*=}") ;;
@@ -34,7 +39,7 @@ while [[ $# -gt 0 ]]; do
     *) if [[ -z "$SVG" ]]; then SVG="$a"; else OUT="$a"; fi ;;
   esac
 done
-USAGE="usage: export_svg.sh <svg> <out_prefix> [--background HEX] [--config F] [--no-travel-under | --travel-max-mm N]"
+USAGE="usage: export_svg.sh <svg> <out_prefix> [--background HEX] [--config F] [--no-travel-under | --travel-max-mm N] [--work-dir DIR]"
 : "${SVG:?$USAGE}"
 : "${OUT:?$USAGE}"
 
@@ -43,7 +48,8 @@ cd "$ROOT"
 
 DIR="$(dirname "$OUT")"
 BASE="$(basename "$OUT")"
-mkdir -p "$DIR"
+WORK="${WORK:-$DIR}"
+mkdir -p "$DIR" "$WORK"
 
 PREVIEW_BG=()
 if [[ -n "$BACKGROUND" ]]; then
@@ -57,9 +63,9 @@ PYTHONPATH=tools/wxstub INKSTITCH_OFFLINE_SCRIPT=true \
 echo "== exporting VP3"
 PYTHONPATH=tools/wxstub INKSTITCH_OFFLINE_SCRIPT=true \
   .venv/bin/python inkstitch/inkstitch.py --extension=zip --format-vp3=True \
-  "$SVG" > "$DIR/$BASE.zip" 2>"$DIR/$BASE.err"
+  "$SVG" > "$WORK/$BASE.zip" 2>"$WORK/$BASE.err"
 
-.venv/bin/python - "$DIR/$BASE.zip" "$DIR/$BASE.vp3" <<'PYEOF'
+.venv/bin/python - "$WORK/$BASE.zip" "$DIR/$BASE.vp3" <<'PYEOF'
 import sys, zipfile
 zip_path, vp3_path = sys.argv[1], sys.argv[2]
 z = zipfile.ZipFile(zip_path)

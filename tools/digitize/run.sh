@@ -49,8 +49,8 @@ while [[ $# -gt 0 ]]; do
     --keep-enclosed) KEEP_ENCLOSED="--keep-enclosed" ;;
     --no-export) NO_EXPORT=1 ;;
     --no-travel-under) NO_TRAVEL=1 ;;
-    --travel-max-mm) TRAVEL_ARGS+=(--max-mm "$1"); shift ;;
-    --travel-max-mm=*) TRAVEL_ARGS+=(--max-mm "${a#*=}") ;;
+    --travel-max-mm) TRAVEL_ARGS+=(--travel-max-mm "$1"); shift ;;
+    --travel-max-mm=*) TRAVEL_ARGS+=(--travel-max-mm "${a#*=}") ;;
     -*) FLAGS+=("$a") ;;
     *) IMG="$a" ;;
   esac
@@ -145,52 +145,15 @@ if [[ "$NO_EXPORT" == "1" ]]; then
   exit 0
 fi
 
-echo "== satin precheck"
-PYTHONPATH=tools/wxstub INKSTITCH_OFFLINE_SCRIPT=true \
-  .venv/bin/python tools/digitize/qa/satin_precheck.py "$OUT_SVG" --fix "$OUT_SVG" || true
-
-echo "== exporting VP3"
-PYTHONPATH=tools/wxstub INKSTITCH_OFFLINE_SCRIPT=true \
-  .venv/bin/python inkstitch/inkstitch.py --extension=zip --format-vp3=True \
-  "$OUT_SVG" > "work/$BASE.zip" 2>"work/$BASE.err"
-
-.venv/bin/python - "$BASE" <<'PYEOF'
-import sys, zipfile
-base = sys.argv[1]
-z = zipfile.ZipFile(f"work/{base}.zip")
-names = z.namelist()
-print("  zip contents:", names)
-open(f"output_vp3/{base}.vp3", "wb").write(z.read(names[0]))
-import pystitch
-p = pystitch.read(f"output_vp3/{base}.vp3")
-xs = [s[0] for s in p.stitches]; ys = [s[1] for s in p.stitches]
-n_changes = sum(1 for s in p.stitches if len(s) > 2 and (s[2] & pystitch.COMMAND_MASK) == pystitch.COLOR_CHANGE)
-threads = []
-for i in range(n_changes + 1):
-    t = p.get_thread_or_filler(i)
-    threads.append(str(getattr(t, "thread", t)))
-print(f"  -> output_vp3/{base}.vp3  ({p.count_stitches()} stitches, "
-      f"{n_changes} colour change(s), {(max(xs)-min(xs))/10:.0f}x{(max(ys)-min(ys))/10:.0f} mm)")
-print(f"  threads: {threads}")
-PYEOF
-
-echo "== stitch plan"
-# same-colour trims become a run under later stitching; trim_vp3 then cuts what is left
-if [[ "$NO_TRAVEL" != "1" ]]; then
-  .venv/bin/python tools/digitize/travel_vp3.py "output_vp3/$BASE.vp3" \
-    ${CONFIG:+--config "$CONFIG"} "${TRAVEL_ARGS[@]}"
+# satin precheck, Ink/Stitch export, travel-under, trim, both previews and the jam
+# check live in export_svg.sh, which the web UI's Make stitch plan runs too
+EXPORT_ARGS=(--work-dir work "${PREVIEW_BG[@]}" "${TRAVEL_ARGS[@]}")
+if [[ -n "$CONFIG" ]]; then
+  EXPORT_ARGS+=(--config "$CONFIG")
 fi
-.venv/bin/python tools/digitize/trim_vp3.py "output_vp3/$BASE.vp3" 8
-# two renders: hairlines show the individual stitches (layout check), thread
-# width shows what the fabric will actually look like (coverage check).  At
-# 1 px hairlines a satin band reads as a dashed line, at 0.5 mm it reads as a
-# solid mass -- neither alone tells the whole story.
-.venv/bin/python tools/digitize/preview.py "output_vp3/$BASE.vp3" \
-  "output_vp3/${BASE}_stitchplan.png" --width 1600 --line-width 1 "${PREVIEW_BG[@]}"
-.venv/bin/python tools/digitize/preview.py "output_vp3/$BASE.vp3" \
-  "output_vp3/${BASE}_coverage.png" --width 1600 --thread-mm 0.5 "${PREVIEW_BG[@]}"
-
-echo "== jam check"
-.venv/bin/python tools/digitize/qa/jam_check.py "output_vp3/$BASE.vp3" || true
+if [[ "$NO_TRAVEL" == "1" ]]; then
+  EXPORT_ARGS+=(--no-travel-under)
+fi
+bash tools/digitize/export_svg.sh "$OUT_SVG" "output_vp3/$BASE" "${EXPORT_ARGS[@]}"
 
 echo "== done: $OUT_SVG and output_vp3/$BASE.vp3"

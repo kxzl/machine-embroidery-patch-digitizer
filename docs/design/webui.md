@@ -284,6 +284,11 @@ T2 and T3 run in parallel with T1, against a hand-written `regions.json` fixture
 
 ### T0. Prerequisite (owned elsewhere)
 
+**Landed 2026-10-12** as master `129cde6` (merge of `feat/rail-satin`), on the
+operator's word. With `rail_satin` and `satin_taper_mm` off, 12 designs gave
+byte-identical SVG and posterized PNG against `6822535`. The text below is the
+state before that.
+
 The main checkout carries another session's uncommitted satin work (seen
 2026-10-12): `tools/digitize/vectorize.py` (new `rail_satin` settings,
 `BLOB_WIDTH_RATIO`), `skeleton.py`, `run.sh` (a `--satin-taper` flag), `docs/USAGE.md`,
@@ -336,8 +341,9 @@ next to `setup` and `doctor`), new `tools/digitize/tests/test_web_server.py`.
   the same `== ...` stage lines as `run.sh`. The server copies `slice.svg` to
   `plan.svg` and calls it with prefix `output/web/<slug>/plan`. The preview
   background follows `run.sh`: YAML `fabric_color:`, else `#101010` for profile
-  `vadmel`, else white. No timeout; Cancel stops it. Switching `run.sh` itself to
-  call `export_svg.sh` waits for T0 (it is the `run.sh` edit), then G1b. Then measure the VP3 with `wizard/vp3.py` and report `core.edge_warnings`
+  `vadmel`, else white. No timeout; Cancel stops it. `run.sh` itself calls
+  `export_svg.sh ... --work-dir work` (done after T0 landed, G1b passed), so the
+  wizard still finds `work/<base>.err`. Then measure the VP3 with `wizard/vp3.py` and report `core.edge_warnings`
   against the hoop.
 - The satin precheck (`qa/satin_precheck.py --fix`) deletes satin columns that
   would crash the export, which can silently undo an applied Satin override.
@@ -388,7 +394,7 @@ Guarantees and the test that would fail if each were false:
 | # | Guarantee | Falsifying test |
 |---|---|---|
 | G1 | Without `stitch_overrides` the pipeline output does not change | In T1's worktree, run `tools/digitize/qa/regress.sh <scratch>/base --vectorize <copy>`, where `<copy>` is the parent commit's `vectorize.py` with its `skeleton.py` and `satinize.py` beside it (the method in `regress.sh`'s header). Then run `regress.sh <scratch>/new`. `sha256sum` of every `.svg` and `.vp3` must match pairwise for the 3 designs (book burner, goat, earth). About 80 s per run. |
-| G1b | T2's `run.sh` refactor does not change output | `run.sh` on Skyfowl (`skyfowl_75.yaml`, `--size-mm 75`) at T2's parent commit and at T2's commit: SVG, VP3 and both PNGs byte-identical. `regress.sh` does not call `run.sh`, so G1 does not cover this. |
+| G1b | T2's `run.sh` refactor does not change output | `run.sh` on Skyfowl (`skyfowl_75.yaml`, `--size-mm 75`) at T2's parent commit and at T2's commit: SVG, VP3 and both PNGs byte-identical. `regress.sh` does not call `run.sh`, so G1 does not cover this. **Passed 2026-10-12**: 5 cases (Skyfowl with the YAML; Skyfowl with `--travel-max-mm 30 --background`; Earth with `--no-travel-under`; Desperado with rail satin and taper on; the Scavenger SVG, a name with spaces), 20 of 20 files identical against `129cde6`. |
 | G2 | An override survives a size change | Slice Skyfowl at 75 mm and at 100 mm with one `at_px`; the same Region comes out satin both times. |
 | G3 | The server is reachable only from this machine | A connection to the machine's LAN address on the port is refused; 127.0.0.1 answers. |
 | G4 | One job at a time | Two concurrent Slice requests give exactly one 202 and one 409. |
