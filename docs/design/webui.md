@@ -43,6 +43,9 @@ What the numbers show:
 - Ink/Stitch caches per element. Changing one attribute on one path cost 10.7 s,
   close to the 9.5 s warm floor, not the 23.7 s cold cost. The warm floor is
   mostly Ink/Stitch start-up.
+- A proxy seen during the T4-lite run on 2026-10-12: Skyfowl re-sliced with YAML
+  `satinize.colors` for two colours (12 satinized Regions) exported in 12.4 s
+  against the cache of its plain version (cold 26 s through the UI).
 - Re-export after a real override is **not measured yet**. A toggle can also
   change neighbouring fills (underlap) and trims, which may miss the cache. At
   Bomb's average of about 7 s per object, a few misses cost tens of seconds and
@@ -155,7 +158,15 @@ index into `overrides` that produced the object, when one did.
 | `GET /api/status` | the whole state the page draws from; the page polls it about once a second while a job runs |
 | `GET /files/<slug>/<name>` | one file directly inside `output/web/<slug>/`; `<name>` must match `^[A-Za-z0-9._-]+$` |
 
-Errors are always `{"error": "<plain words>"}`. 409 means a job is running (E6).
+Errors are always `{"error": "<plain words>"}`. 409 means a job is running (E6),
+checked before the body is validated. 403 means the request did not come from a
+page on this machine: the `Host` header must be `127.0.0.1:<port>` or
+`localhost:<port>`, and a POST with an `Origin` header must come from one of
+those. This stops other web pages and DNS rebinding from driving the server.
+`picture.url` carries `?v=<n>`, raised on every accepted upload. A rejected
+upload leaves the previous job untouched; a failed Slice keeps the last good
+`job.yaml` (the new config is written to `job.next.yaml` first) and uses no
+`slice_id`.
 
 ```text
 GET  /api/options  -> 200 {"hoops": [[120, 120], [260, 200]], "default_hoop": 0,
@@ -199,7 +210,9 @@ GET  /api/status -> 200
                     "svg_url": "/files/<slug>/slice.svg?v=3",
                     "regions_url": "/files/<slug>/slice.regions.json?v=3" or null,
                     "posterized_url": "/files/<slug>/slice_posterized.png?v=3" or null,
-                    "overrides": [... as sent with that Slice]},
+                    "overrides": [... as sent with that Slice],
+                    "hoop": [120, 120],          # what this Slice ran with; used by Make stitch plan
+                    "background": "#101010" or null},
   "stitchplan": null or {"slice_id": 2,
                     "stitchplan_url": "/files/<slug>/plan_stitchplan.png?v=2",
                     "coverage_url": "/files/<slug>/plan_coverage.png?v=2",
