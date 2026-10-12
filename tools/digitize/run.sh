@@ -41,7 +41,7 @@ while [[ $# -gt 0 ]]; do
     --config=*) CONFIG="${a#*=}"; FLAGS+=("$a") ;;
     --*=*) FLAGS+=("$a") ;;
     --colors|--border-mm|--trim-mm|--density|--satin-max-mm|--size-mm|\
-    --overlap-mm|--seam-pull-mm|--width-mm|--height-mm|--border-color|--skip-colors|\
+    --satin-taper|--overlap-mm|--seam-pull-mm|--width-mm|--height-mm|--border-color|--skip-colors|\
     --fill-angle|--satinize-colors|--palette|--palette-mode|\
     --underlap-mm|--raster-pull-mm|--profile|--fit-mm)
       FLAGS+=("$a" "$1"); shift ;;

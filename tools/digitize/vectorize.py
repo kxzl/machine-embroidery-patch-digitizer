@@ -48,12 +48,12 @@ from skimage import color, measure, morphology
 
 import gradient as gradfit
 import satinize
-from skeleton import satin_segments
+from skeleton import satin_segments, trace_skeleton
 
 _VALUE_FLAGS = {"--colors", "--border-mm", "--trim-mm", "--config", "--density",
                 "--satin-max-mm", "--size-mm", "--fill-angle", "--satinize-colors",
                 "--palette", "--palette-mode", "--underlap-mm", "--raster-pull-mm",
-                "--profile", "--fit-mm"}
+                "--profile", "--fit-mm", "--satin-taper"}
 
 # module-level defaults (docs reference these names); build_settings resolves the
 # per-run values into a Settings instance.
@@ -82,6 +82,19 @@ CIRCLE_GAP_MM = 1.0        # border.mode circle with gaps: the ring stops this f
                            # shape that crosses it (the art's keyline width)
 CROSS_REACH_DEG = 15.0     # border.mode circle: a crossing shape may enter the ring band
                            # this many degrees away from where it leaves the circle
+
+# A solid shape (a star, a pommel) has no skeleton stroke: its skeleton is a
+# handful of short spokes, so satin along it stitches an asterisk instead of the
+# shape.  Such a component is stitched as a rail satin instead, but only when
+# asked for (``--rail-satin``), because rails cost a denser stitch than skeleton
+# bands.  BLOB_WIDTH_RATIO is the test: the widest band the component's own
+# skeleton carries, as a fraction of the component's thickest point.  A stroke
+# sits at 0.8-1.0 (its skeleton is as wide as the shape), a star at 0.45.
+BLOB_WIDTH_RATIO = 0.55
+RAIL_MIN_GAP_MM = 0.25     # rails may come this close before the row packs thread
+RAIL_MAX_OVERHANG = 0.2     # a rail row may leave at most this much of its band
+                            # outside the shape, or the shape is left a fill
+RAIL_ZIGZAG_MM = 0.35       # zigzag on a rail satin row (same as the authored border satin)
 
 # Named fabric profiles (review.md section 2.5): reviewed starting values for one
 # fabric type.  YAML ``profile:`` / ``--profile`` selects one; an explicit CLI
@@ -146,6 +159,11 @@ class Settings:
     fabric_color: str = ""
     gradients: list = field(default_factory=list)   # [{name, stops, min_area_mm2, min_r2, row_spacing_mm}]
     thin_lines: str = "widen"     # outline runs under the satin gate: "widen" to satin, or "run" = bean stitch
+    satin_taper_mm: float = 0.0   # >0: split each satin run into pieces this long, each
+                                  # with the width its own stretch of line measures
+    rail_satin: bool = False      # solid outline blobs and the parts no skeleton satin reached
+                                  # become rail satin rows instead of fills
+    rail_satin_leftover: bool = True   # ... including the parts no skeleton satin reached
     outline_order: str = "centroid"   # outline stitch order: by "centroid" (default) or by path "endpoint"
     outline_zigzag_spacing_mm: float | None = None   # satin zigzag spacing on outline satins (None = Ink/Stitch 0.4)
     cleanup_min_width_mm: float = 0.0   # >0: parts of any colour thinner than this join the nearest colour
@@ -459,6 +477,21 @@ def build_settings(flags, cfg):
         print(f"warning: ignoring thin_lines {_thin!r} (use widen or run)")
         _thin = "widen"
 
+    # --- satin_taper: one satin width per run, or one per stretch of line -------
+    _taper = flag("satin-taper", None)
+    _taper_mm = cfg.get("satin_taper_mm")
+    satin_taper_mm = float(_taper if _taper is not None else
+                           (_taper_mm if _taper_mm is not None else 0.0))
+    if satin_taper_mm < 0:
+        print(f"warning: ignoring satin_taper {satin_taper_mm} (use 0 or a length in mm)")
+        satin_taper_mm = 0.0
+
+    # --- rail_satin: stitch solid outline blobs as rail satin rows, not fills ----
+    _rail = flag("rail-satin", None)
+    rail_satin = bool(cfg.get("rail_satin", False)) if _rail is None else (_rail is True)
+    _rail_left = cfg.get("rail_satin_leftover", True)
+    rail_satin_leftover = bool(_rail_left)
+
     # --- trim.min_mm: jumps up to this length are never cut (Ink/Stitch adds no
     # lock stitches for gaps under its 3 mm collapse length) ----------------------
     try:
@@ -562,7 +595,8 @@ def build_settings(flags, cfg):
         fill_underlay_light_l=fill_underlay_light_l, satin_underlay=satin_underlay,
         satin_underlay_inset_mm=satin_underlay_inset_mm,
         border_zigzag_spacing_mm=border_zigzag, fabric_color=fabric_color,
-        gradients=_gradients, thin_lines=_thin, outline_order=_oo,
+        gradients=_gradients, thin_lines=_thin, outline_order=_oo, rail_satin=rail_satin,
+        rail_satin_leftover=rail_satin_leftover, satin_taper_mm=satin_taper_mm,
         trim_min_mm=_trim_min, outline_zigzag_spacing_mm=_ozz,
         cleanup_min_width_mm=cleanup_min_width_mm, cleanup_min_area_mm2=cleanup_min_area_mm2,
         cleanup_fabric_min_width_mm=cleanup_fabric_min_width_mm,
@@ -1525,6 +1559,115 @@ def contour_paths(mask, min_area, min_hole, tolerance):
     return paths, cents, pts, keep_lab, dropped, polys_out
 
 
+def blob_mask(lw_mask):
+    """Outline components whose skeleton does not describe their own shape.
+
+    ``satin_segments`` gives a solid shape (a star, a pommel) one short spoke per
+    limb, so the star is stitched as an asterisk.  A component qualifies as a blob
+    when its widest skeleton band is under ``BLOB_WIDTH_RATIO`` of its thickest
+    point: the skeleton is too thin to be a stroke through the shape.  A shape
+    with a hole is never a blob: its skeleton is the ring around the hole, which
+    is exactly the satin you want.
+    """
+    blobs = np.zeros_like(lw_mask)
+    dist = ndimage.distance_transform_edt(lw_mask)
+    lab, n = ndimage.label(lw_mask)
+    for i in range(1, n + 1):
+        comp = lab == i
+        thick = 2.0 * float(dist[comp].max())
+        if thick <= 0:
+            continue
+        skel_w = 0.0
+        for chain in trace_skeleton(morphology.skeletonize(comp)):
+            if len(chain) < 2:
+                continue
+            arr = np.asarray(chain, float)
+            skel_w = max(skel_w, 2.0 * float(np.median(
+                dist[arr[:, 0].astype(int), arr[:, 1].astype(int)])))
+        if ndimage.binary_fill_holes(comp).sum() == comp.sum() and skel_w < BLOB_WIDTH_RATIO * thick:
+            blobs |= comp
+    return blobs
+
+
+def _rail_band(rail_pairs, n=48):
+    """Area covered by the satin between each pair of rails, unioned.
+
+    Each pair is sampled to ``n`` points along its length, which is how Ink/Stitch
+    pairs the rails, so the polygon is what the zigzag actually spans.
+    """
+    from shapely.geometry import LineString
+    from shapely.ops import unary_union
+
+    ts = np.linspace(0.0, 1.0, n)
+    quads = []
+    for rail_a, rail_b in rail_pairs:
+        a = LineString(rail_a).interpolate(ts, normalized=True)
+        b = LineString(rail_b).interpolate(ts, normalized=True)
+        for i in range(n - 1):
+            q = Polygon([(a[i].x, a[i].y), (a[i + 1].x, a[i + 1].y),
+                         (b[i + 1].x, b[i + 1].y), (b[i].x, b[i].y)])
+            if not q.is_valid:
+                q = q.buffer(0)
+            if not q.is_empty:
+                quads.append(q)
+    return unary_union(quads) if quads else None
+
+
+def blob_rail_satins(mask, scale, rgb, min_area_px):
+    """Solid components -> rail satin rows. Returns (handled_mask, items).
+
+    The rails are the component's own outline, split along its long axis into
+    1-3 rows, so the satin follows the shape instead of crossing it: that is the
+    only way to stitch a star or a pommel as satin.  The builder is
+    ``invert_ink.try_plate_satin``, the one the Scavenger's Daughter plates use
+    (imported here so the rail geometry lives in one place).  A component whose
+    rows would spill outside it is left alone: it stays a fill rather than growing
+    satin over the bare fabric.
+    """
+    import invert_ink
+    from shapely.affinity import scale as shp_scale
+
+    handled = np.zeros_like(mask)
+    items = []
+    lab, n = ndimage.label(mask)
+    for i in range(1, n + 1):
+        comp = lab == i
+        if comp.sum() < min_area_px:
+            continue
+        if ndimage.binary_fill_holes(comp).sum() != comp.sum():
+            continue        # a hole wants the skeleton: rails would stitch over it
+        cnts = measure.find_contours(np.pad(comp, 1), 0.5)
+        if not cnts:
+            continue
+        # find_contours gives (row, col); shapely wants (x, y)
+        outer = max(cnts, key=_poly_area)[:, ::-1] - 1
+        poly = Polygon(outer).simplify(scale.tolerance)
+        if poly.is_empty or poly.geom_type != "Polygon":
+            continue
+        poly_mm = shp_scale(poly, scale.scale, scale.scale, origin=(0, 0))
+        rows, _stats = invert_ink.try_plate_satin(poly_mm, zigzag=RAIL_ZIGZAG_MM,
+                                                  min_gap=RAIL_MIN_GAP_MM)
+        if rows is None:
+            continue
+        band = _rail_band([(sub[0], sub[1]) for sub, _ in rows])
+        if band is None or band.is_empty:
+            continue
+        if band.difference(poly_mm).area > RAIL_MAX_OVERHANG * band.area:
+            continue        # the rows would grow outside the shape: leave it a fill
+        for subpaths, st in rows:
+            rails = [np.asarray(r, float) / scale.scale for r in subpaths]
+            pts = np.vstack(rails)
+            d = " ".join("M " + " L ".join(f"{x:.1f},{y:.1f}" for x, y in r) for r in rails)
+            items.append(dict(cent=(float(pts[:, 0].mean()), float(pts[:, 1].mean())),
+                              pts=pts, d=d, satin=True, stroke=False, lab_id=None,
+                              rgb=rgb, spacing=None,
+                              # decorative: a rail satin takes its width from the
+                              # rails, but it must clear Ink/Stitch's 1 mm gate
+                              width_px=max(SATIN_MIN_MM, st["sep_max"]) * scale.px_per_mm))
+        handled |= comp
+    return handled, items
+
+
 def outline_satins(img, scale, masks, palette, lw, settings):
     """Skeletonize the darkest colour's thin parts into satin segments.
 
@@ -1538,62 +1681,107 @@ def outline_satins(img, scale, masks, palette, lw, settings):
         return outline_items, lw_cover
 
     lw_mask = masks[lw]
+    rail_done = np.zeros_like(lw_mask)
+    if settings.rail_satin:
+        # solid blobs first: their skeleton is an asterisk, not a satin band
+        blobs = blob_mask(lw_mask)
+        rail_done, items = blob_rail_satins(blobs, scale, palette.centroids[lw],
+                                            scale.min_comp_px)
+        lw_mask = lw_mask & ~rail_done
+        if items:
+            outline_items += items
+            print(f"rail satin: {len(items)} row(s) on "
+                  f"{blobs.sum() / scale.px_per_mm ** 2:.1f} mm2 of solid blob(s) "
+                  f"(skeleton under {BLOB_WIDTH_RATIO:g} of the shape's thickness)")
     thin_run = settings.thin_lines == "run"
-    segs = satin_segments(lw_mask, scale.px_per_mm, settings.satin_min_len_mm,
-                          settings.satin_min_mm, settings.satin_max_mm, scale.tolerance,
-                          extend_ends=settings.satin_extend, raw_widths=thin_run)
+    seg_items, lw_cover = _skeleton_satins(img, lw_mask, masks[lw], scale,
+                                           palette.centroids[lw], settings, thin_run)
+    outline_items += seg_items
+    n_sat = sum(1 for i in seg_items if i["satin"])
+    if lw_cover is None:
+        if not rail_done.any():
+            return outline_items, lw_cover
+        lw_cover = np.zeros_like(lw_mask)
+    lw_cover = lw_cover | rail_done
+    _extra = f" + {len(seg_items) - n_sat} thin running lines" if thin_run else ""
+    print(f"satin outlines: {n_sat} segments{_extra} from {_rgb_str(palette.centroids[lw])}")
+    if settings.rail_satin and settings.rail_satin_leftover:
+        # Whatever no skeleton satin reached is solid: a rail satin row, not a
+        # tatami fill, so the whole outline colour stays satin.  A leftover whose
+        # rails would pack or spill is left as fill -- a satin widened to reach it
+        # would leave its mask and notch the edge.
+        leftover = masks[lw] & ~lw_cover
+        done, items2 = blob_rail_satins(leftover, scale, palette.centroids[lw],
+                                        scale.min_comp_px)
+        if items2:
+            outline_items += items2
+            lw_cover = lw_cover | ndimage.binary_dilation(done, morphology.disk(2))
+            left = float((leftover & ~done).sum()) / scale.px_per_mm ** 2
+            print(f"solid pass: {len(items2)} rail row(s) on the "
+                  f"{leftover.sum() / scale.px_per_mm ** 2:.1f} mm2 the skeleton satin "
+                  f"did not reach" + (f", {left:.1f} mm2 left as fill" if left else ""))
+    return outline_items, lw_cover
+
+
+def _skeleton_satins(img, mask, clip, scale, rgb, settings, thin_run):
+    """Satin runs (and the area they cover) for one mask. Returns (items, cover).
+
+    A satin shorter than it is wide is not stitchable: its rails are shorter than
+    the zigzag travel, and Ink/Stitch then builds a section with no points and
+    dies with "tuple index out of range" in flattened_sections.  Polygonal
+    simplification can shorten a run below the satin_min_len_mm gate, so the
+    emitted polyline is re-tested.  A short run that closes on itself (its ends
+    closer than half its width) is the outline of a blob smaller than the satin
+    is wide: the two offset rails cross and Ink/Stitch dies in the same place.
+    """
+    W, H = img.W, img.H
+    items = []
+    raw_segs = satin_segments(mask, scale.px_per_mm, settings.satin_min_len_mm,
+                              settings.satin_min_mm, settings.satin_max_mm, scale.tolerance,
+                              extend_ends=settings.satin_extend, raw_widths=thin_run,
+                              taper_mm=settings.satin_taper_mm)
     runs = []
     if thin_run:
         # runs thinner than the satin gate stitch as a bean-stitch line along the
         # centre line instead of a satin widened to satin_min_mm
         gate_px = settings.satin_gate_mm * scale.px_per_mm
-        runs = [(d, poly, w_raw) for d, poly, w, w_raw in segs if w_raw < gate_px]
-        segs = [(d, poly, w) for d, poly, w, w_raw in segs if w_raw >= gate_px]
-    # A satin shorter than it is wide is not stitchable: its rails are shorter
-    # than the zigzag travel, and Ink/Stitch then builds a section with no
-    # points and dies with "tuple index out of range" in flattened_sections.
-    # Polygonal simplification can shorten a run below the SATIN_MIN_LEN_MM
-    # gate, so re-test on the emitted polyline.
-    # A short run that closes on itself (its ends closer than half its width)
-    # is the outline of a blob smaller than the satin is wide: the two offset
-    # rails cross and Ink/Stitch dies in the same place.
-    _segs = []
+        runs = [(d, poly, w_raw) for d, poly, w, w_raw in raw_segs if w_raw < gate_px]
+        raw_segs = [(d, poly, w) for d, poly, w, w_raw in raw_segs if w_raw >= gate_px]
+    segs = []
     n_loops = 0
-    for d, poly, w in segs:
+    for d, poly, w in raw_segs:
         _px = float(np.hypot(*np.diff(poly, axis=0).T).sum())
         if _px / scale.px_per_mm < max(2.5, 1.5 * w / scale.px_per_mm):
             continue
         if _px < 10.0 * w and float(np.hypot(*(poly[0] - poly[-1]))) < 0.5 * w:
             n_loops += 1
             continue
-        _segs.append((d, poly, w))
-    if len(_segs) != len(segs):
-        print(f"note: dropped {len(segs) - len(_segs)} outline satin(s) shorter than "
-              f"their own width or closed on themselves ({len(segs)} -> {len(_segs)}"
+        segs.append((d, poly, w))
+    if len(segs) != len(raw_segs):
+        print(f"note: dropped {len(raw_segs) - len(segs)} outline satin(s) shorter than "
+              f"their own width or closed on themselves ({len(raw_segs)} -> {len(segs)}"
               + (f", {n_loops} loop(s)" if n_loops else "") + ")")
-    segs = _segs
-    if segs or runs:
-        cover_img = Image.new("L", (W, H), 0)
-        cover_draw = ImageDraw.Draw(cover_img)
-        for d, poly, w_raw in runs:
-            outline_items.append(dict(cent=(float(poly[:, 0].mean()), float(poly[:, 1].mean())),
-                                      pts=poly, d=d, satin=False, stroke=True, lab_id=None,
-                                      rgb=palette.centroids[lw], spacing=None, width_px=w_raw))
-            cover_draw.line([(float(x), float(y)) for y, x in poly], fill=255,
-                            width=max(1, int(round(w_raw))), joint="curve")
-        for d, poly, w in segs:
-            outline_items.append(dict(cent=(float(poly[:, 0].mean()), float(poly[:, 1].mean())),
-                                      pts=poly, d=d, satin=True, lab_id=None,
-                                      rgb=palette.centroids[lw], spacing=None, width_px=w))
-            cover_draw.line([(float(x), float(y)) for y, x in poly], fill=255,
-                            width=max(1, int(round(w))), joint="curve")
-        # dilate the band a couple of px before carving the fill: otherwise the
-        # band-edge mismatch with the simplified skeleton leaves sub-mm slivers
-        lw_cover = ndimage.binary_dilation((np.array(cover_img) > 0) & lw_mask,
-                                           structure=morphology.disk(2))
-        _extra = f" + {len(runs)} thin running lines" if runs else ""
-        print(f"satin outlines: {len(outline_items) - len(runs)} segments{_extra} from {_rgb_str(palette.centroids[lw])}")
-    return outline_items, lw_cover
+    if not (segs or runs):
+        return items, None
+    cover_img = Image.new("L", (W, H), 0)
+    cover_draw = ImageDraw.Draw(cover_img)
+    for d, poly, w_raw in runs:
+        items.append(dict(cent=(float(poly[:, 0].mean()), float(poly[:, 1].mean())),
+                          pts=poly, d=d, satin=False, stroke=True, lab_id=None,
+                          rgb=rgb, spacing=None, width_px=w_raw))
+        cover_draw.line([(float(x), float(y)) for y, x in poly], fill=255,
+                        width=max(1, int(round(w_raw))), joint="curve")
+    for d, poly, w in segs:
+        items.append(dict(cent=(float(poly[:, 0].mean()), float(poly[:, 1].mean())),
+                          pts=poly, d=d, satin=True, lab_id=None,
+                          rgb=rgb, spacing=None, width_px=w))
+        cover_draw.line([(float(x), float(y)) for y, x in poly], fill=255,
+                        width=max(1, int(round(w))), joint="curve")
+    # dilate the band a couple of px before carving the fill: otherwise the
+    # band-edge mismatch with the simplified skeleton leaves sub-mm slivers
+    cover = ndimage.binary_dilation((np.array(cover_img) > 0) & clip,
+                                    structure=morphology.disk(2))
+    return items, cover
 
 
 def gradient_regions(img, scale, palette, masks, fill_colors, lw, settings):
