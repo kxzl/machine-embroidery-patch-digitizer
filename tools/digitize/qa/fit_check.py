@@ -54,6 +54,7 @@ def stitched(svg, tag):
     vp3 = f"{OUT}/{tag}.vp3"
     with zipfile.ZipFile(z) as zf:
         open(vp3, "wb").write(zf.read(zf.namelist()[0]))
+    run([PY, "tools/digitize/travel_vp3.py", vp3])
     run([PY, "tools/digitize/trim_vp3.py", vp3, "8"])
     import pystitch
     p = pystitch.read(vp3)
