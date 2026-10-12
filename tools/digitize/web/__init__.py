@@ -1,0 +1,1 @@
+"""Local web server for the picture-to-patch pipeline. Entry: digitize.py web -> main(argv)."""

@@ -3,6 +3,7 @@
 
     python3 digitize.py setup     one-time install (needs uv)
     python3 digitize.py doctor    check that everything is ready
+    python3 digitize.py web       start the local web page (127.0.0.1, --port N)
     python3 digitize.py           start the guided wizard
 
 Standard library only, Python 3.9 or newer, so it starts on the system Python
@@ -59,6 +60,9 @@ def run(argv, root: Path = ROOT) -> int:
         return 2  # not reached
 
     sys.path.insert(0, str(root))
+    if argv[:1] == ["web"]:
+        from tools.digitize.web.server import main as web_main
+        return int(web_main(list(argv[1:])) or 0)
     try:
         from tools.digitize.wizard import main as wizard_main
     except ImportError as exc:
