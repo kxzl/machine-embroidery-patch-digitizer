@@ -61,6 +61,22 @@ do not spill far outside it. Used for shapes too thin for a tatami fill to
 cover cleanly.
 _Avoid_: Auto-satin, outline conversion
 
+**Region**:
+A connected area of one Thread colour that the pipeline stitches as one object:
+one fill, or the satin rows that replace it. The unit an operator picks a
+Stitch type override for. A Gradient region spans several Thread colours and is
+not a Region.
+_Avoid_: Component, shape, object, area
+
+**Stitch type override**:
+An operator's choice of Fill or Satin for one Region, replacing the pipeline's
+own choice. A Satin override is a request: a Region of any width gets as many
+parallel satin rows as it needs, but if the rows fail the coverage test the
+Region stays a fill and the override is reported as refused. An override names
+a point on the picture, not a Region, and applies to whatever fill Region holds
+that point at the next Slice; a point that lands in no fill Region is orphaned.
+_Avoid_: Paint, modifier, mask
+
 **Hotspot**:
 A small area (roughly a 1-2 mm cell) whose stitch density is several times the
 fill average. Caused by underlay, tie locks and ladder fills packed into tiny
@@ -71,6 +87,18 @@ _Avoid_: Dense area, clump
 A rendered image of a machine file showing every needle penetration in thread
 colour, used to check a file without sewing it.
 _Avoid_: Preview, simulation, thumbnail
+
+**Slice**:
+One vectorize run over the current picture, settings and Stitch type overrides.
+It writes the Ink/Stitch SVG and its Region map but no machine file, so it
+takes seconds. Making the Stitch plan is a separate, slower step.
+_Avoid_: Run, render, digitize
+
+**Region map**:
+A drawing of the SVG a Slice wrote: each Region in its Thread colour, marked by
+the stitch type it got (fill, satin, refused satin). It exists before any
+stitches do, so it shows layout and stitch types, not density or travel.
+_Avoid_: Preview, stitch plan, render
 
 **Satin gate**:
 Ink/Stitch's 1.0 mm minimum satin width. Geometry thinner than this is silently
