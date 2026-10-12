@@ -150,7 +150,7 @@ put on `PYTHONPATH` automatically by `run.sh` for the Ink/Stitch export step.
 | `--trim-mm N` | `4.0` | Cut a jump longer than this (mm); `0` = cut every long/exposed jump. A jump is skipped only when both its nearest-boundary distance and its worst one-sided travel are under the threshold; jumps under 2 mm are always skipped. The last object of every layer is trimmed when the next object is farther than 2 mm. |
 | `--no-travel-under` | off | `run.sh` only: keep every same-colour trim as a cut. By default `travel_vp3.py` turns a trim between two objects of one colour into a running stitch under later stitching when it can. Not forwarded to `vectorize.py`. |
 | `--travel-max-mm N` | `60` | `run.sh` only: the longest run (mm) `travel_vp3.py` sews instead of cutting. Longer routes stay cuts. |
-| `--config F` | none | Per-image YAML config (`order`, `skip_colors`, `density`, `angle`, `border`, `trim`, `travel`, `palette`, `palette_mode`, `profile`, `underlap_mm`, `raster_pull_mm`, `fill_underlay_skip_last`, `fill_underlay_double`, `satin_underlay`, `border_zigzag_spacing_mm`, `fabric_color`). CLI flags win over its values. Generate a starter with `tools/digitize/make_config.py <image>`, which also parses the `**Palette:**` line from `patch_descriptions/prompts/<name>.md` into `palette:` when one exists. |
+| `--config F` | none | Per-image YAML config (`order`, `skip_colors`, `density`, `angle`, `border`, `trim`, `travel`, `palette`, `palette_mode`, `profile`, `underlap_mm`, `raster_pull_mm`, `fill_underlay_skip_last`, `fill_underlay_double`, `satin_underlay`, `border_zigzag_spacing_mm`, `fabric_color`, `cleanup`, `threads`). CLI flags win over its values. Generate a starter with `tools/digitize/make_config.py <image>`, which also parses the `**Palette:**` line from `patch_descriptions/prompts/<name>.md` into `palette:` when one exists. |
 | `--no-export` | off | `run.sh` only: stop after writing the SVG, skip the Ink/Stitch VP3 export. Not forwarded to `vectorize.py`. |
 | (positional) input | — | Path to the source image (`.webp`/`.png`/`.jpg`). |
 | (positional) output | `work/design.svg` | Output SVG path. |
@@ -241,6 +241,20 @@ tools/digitize/run.sh --profile vadmel --density 0.4 --config work/example.yaml 
   `max_stitch_length_mm="7"`, which inset the crossed stitches and split the long
   cross-stitches where the border fans at a tight tip (a horn/claw point) instead
   of leaving a long bar of thread.
+- **Circle ring.** `mode: circle` fits a circle to the patch's outer edge (rays
+  that break out, such as horns or a beard, stay out of the fit) and stitches a
+  satin ring `thickness_mm` wide whose outer edge is that circle. Everything the
+  art draws in the ring band or outside the circle is removed (its own thin rim,
+  edge chips), except shapes that cross the circle: those are found by angle and
+  kept. Keys:
+  - `color: '#rrggbb'`: the ring's source colour (mapped through `threads:`).
+    Default: the darkest stitched colour.
+  - `order: first` sews the ring as one closed satin before the fills, so the
+    crossing shapes lie on top of it. `order: last` (default) sews it on top and,
+    with `gaps: true` (default), stops it 1 mm short of each crossing shape, so
+    it is cut into arcs with a trim between them.
+  - `underlay: true` adds centre-walk and contour underlay to the ring (wide
+    rings want it).
 
 ---
 
@@ -467,6 +481,48 @@ gradients:
 
 Use `run` for detailed AI-made art with hairline outlines: the widened satins
 pile up where lines meet.
+
+### Small detail (`cleanup:` YAML)
+
+Every connected island of a colour is its own object, with its own lock stitches
+and usually a trim. `cleanup:` merges detail below the art's detail limit into the
+nearest colour before anything is traced. Without the key the output is unchanged.
+
+```yaml
+cleanup:
+  min_width_mm: 1.0          # stitched parts thinner than this join their neighbour
+  min_area_mm2: 3.0          # stitched islands smaller than this join their neighbour
+  fabric_min_width_mm: 1.2   # skipped colours (fabric showing through), see below
+  fabric_min_area_mm2: 1.0
+```
+
+The `fabric_*` values apply to `skip_colors`. A fabric spot inside a fill is only a
+hole and costs no trim, so it can stay small. A thin fabric line is filled in only
+when one stitched colour alone lies next to it: a line that splits one colour into
+two islands closes, while a keyline between two different colours or along the
+patch edge stays. Midnight Epicure (`patch_descriptions/epicure_green.yaml`):
+islands 79 -> 43, trims 45 -> 31, both eyes kept.
+
+### Thread colours (`threads:` YAML)
+
+`threads:` maps a source colour to the thread colour written to the SVG and VP3.
+Segmentation, `order`, `skip_colors`, `density` and `angle` keep using the source
+hexes. The posterized preview shows the thread colours.
+
+```yaml
+threads:
+  '#4a4947': '#1f5e2b'
+  '#93928e': '#6cbf3f'
+```
+
+### Small fills (ADR 0003)
+
+A fill smaller than 2.5 mm² or thinner than 1 mm (largest inscribed circle) is
+emitted with `fill_underlay="false"`, as `svg_digitize.py` already does: an underlay
+on a speck packs the needle. It also gets `ties="3"` (no lock stitches), but only
+when no trim and no colour change touches it. Ink/Stitch adds locks only around a
+cut or a long jump, and `ties="3"` would remove those too and leave the cut tail
+unlocked. Always on.
 
 ### Keep enclosed background (`--keep-enclosed`)
 
