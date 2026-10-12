@@ -192,6 +192,9 @@ pre {
 }
 .viewport.dragging { cursor: grabbing; }
 
+/* No native image drag and no text selection: both belong to the pan and the click. */
+.content, .viewport { -webkit-user-drag: none; user-select: none; }
+
 /* One shared transform state, written to both panes, so they stay in sync. */
 .content {
   position: absolute;
@@ -202,7 +205,7 @@ pre {
 
 .placeholder { margin: 14px; color: var(--dim); font-size: .82rem; }
 
-#content-picture img { display: block; image-rendering: auto; }
+#content-picture img { display: block; image-rendering: auto; -webkit-user-drag: none; user-select: none; }
 
 .pane-hint { padding: 6px 10px; border-top: 1px solid var(--bord); margin: 0; }
 
@@ -212,14 +215,36 @@ pre {
 .rmap path.locked { cursor: not-allowed; opacity: .28; }
 .rmap path.locked:hover { opacity: .5; }
 
-/* satinized Regions: dashed outline over the fill as drawn */
+/* satinized Regions: a dark outline over the fill as drawn. The stroke rules carry
+   !important because the emitted SVG sets its own stroke inline. The stroke is solid,
+   not dashed: a dash pattern is honoured by isPointInStroke and by the browser's own
+   hit testing, so dashes would leave gaps where the Region cannot be clicked at all. */
 .rmap path.kind-satinized {
-  stroke: #101018;
-  stroke-width: 5;
-  stroke-dasharray: 16 10;
+  stroke: #101018 !important;
   vector-effect: non-scaling-stroke;
 }
-.rmap path.region:not(.locked):hover { stroke: #8ab4ff; stroke-width: 2; vector-effect: non-scaling-stroke; }
+/* a Region holding a refused override: red outline, still clickable */
+.rmap path.refused {
+  stroke: #ff5f56 !important;
+  stroke-width: 3;
+  vector-effect: non-scaling-stroke;
+}
+/* an object the satin precheck took out before the export. The dashes are drawn on the
+   marks overlay, not here: a dash pattern on the path itself would leave gaps that
+   isPointInStroke and the browser both read as "not on this Region". */
+.rmap path.removed {
+  stroke: #ff5f56 !important;
+  stroke-dasharray: none;
+  opacity: .45 !important;
+}
+.rmap g.marks { pointer-events: none; }
+.rmap g.marks path {
+  fill: none;
+  stroke: #ff5f56;
+  stroke-dasharray: 8 6;
+  vector-effect: non-scaling-stroke;
+}
+.rmap path.region:not(.locked):hover { stroke: #8ab4ff !important; stroke-width: 2; vector-effect: non-scaling-stroke; }
 
 /* overlay markers */
 .rmap g.overrides { pointer-events: none; }
@@ -258,7 +283,7 @@ pre {
   border-radius: 8px;
   padding: 8px;
 }
-.plan-image img { display: block; max-width: 100%; }
+.plan-image img { display: block; max-width: 100%; height: auto; }
 .plan-facts { width: 280px; flex: 0 0 280px; overflow-y: auto; }
 .facts { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: .82rem; }
 .facts td { padding: 3px 4px; border-bottom: 1px solid var(--bord); vertical-align: top; }

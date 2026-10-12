@@ -11,6 +11,10 @@
   var MIN_SCALE = 0.02;
   var MAX_SCALE = 40;
   var DRAG_PX = 3;
+  var ZOOM_STEP = 1.0015;                 // per wheel pixel
+  var ZOOM_PER_EVENT = [0.5, 2];          // one event never jumps further than this
+  var WHEEL_LINE_PX = 16;                 // deltaMode 1 (Firefox sends lines)
+  var WHEEL_PAGE_PX = 400;                // deltaMode 2
 
   var SVG_NS = 'http://www.w3.org/2000/svg';
   var INKSTITCH_NS = 'http://inkstitch.org/namespace';
@@ -84,6 +88,10 @@
     return s === 'slicing' || s === 'exporting';
   }
 
+  function runState() {
+    return state.status ? state.status.state : 'idle';
+  }
+
   /* ---- server calls ---- */
 
   function api(path, options) {
@@ -141,6 +149,7 @@
   /* ---- picture (POST /api/picture) ---- */
 
   function uploadPicture(file) {
+    state.actionError = '';
     var form = new FormData();
     form.append('picture', file);
     return api('/api/picture', { method: 'POST', body: form }).then(function (body) {
@@ -180,6 +189,7 @@
   /* ---- config (POST /api/yaml) ---- */
 
   function loadYaml(file) {
+    state.actionError = '';
     return file.text().then(function (yamlText) {
       state.yamlText = yamlText;
       return postJson('/api/yaml', { yaml_text: yamlText });
@@ -254,7 +264,7 @@
   }
 
   function runAction(promise) {
-    state.actionError = '';
+    state.actionError = '';                  /* the last complaint goes when a new one starts */
     return promise.then(function () {
       return afterAction();
     }).catch(function (err) {
@@ -270,15 +280,18 @@
   }
 
   function doSlice() {
+    state.actionError = '';
     hidePopover();
     return runAction(postJson('/api/slice', sliceBody()));
   }
 
   function doStitchplan() {
+    state.actionError = '';
     return runAction(api('/api/stitchplan', { method: 'POST' }));
   }
 
   function doCancel() {
+    state.actionError = '';
     return runAction(postJson('/api/cancel', {}));
   }
 
@@ -304,6 +317,8 @@
   function renderStatus() {
     var status = state.status;
     var busy = isBusy();
+    /* The run finished, so whatever an earlier click was told ("busy") is history. */
+    if (busy === false && runState() === 'idle') { state.actionError = ''; }
     if (!busy) { stopPolling(); }
 
     $('prog-state').textContent = status.state;
@@ -368,6 +383,7 @@
       clearNode(host);
       img = document.createElement('img');
       img.alt = 'Picture';
+      img.setAttribute('draggable', 'false');
       host.appendChild(img);
     }
     if (img.getAttribute('src') !== url) { img.setAttribute('src', url); }
@@ -435,6 +451,7 @@
     /* Same pixel grid as the picture pane (D12): size in pixels, viewBox kept. */
     svg.setAttribute('width', String(size[0]));
     svg.setAttribute('height', String(size[1]));
+    svg.setAttribute('draggable', 'false');
     svg.classList.add('rmap');
 
     var kinds = null;
@@ -454,6 +471,10 @@
     var overlay = document.createElementNS(SVG_NS, 'g');
     overlay.setAttribute('class', 'overrides');
     svg.appendChild(overlay);
+    /* Drawn decoration that must never take a click away from a Region (see P1/P4). */
+    var marks = document.createElementNS(SVG_NS, 'g');
+    marks.setAttribute('class', 'marks');
+    svg.appendChild(marks);
 
     var host = $('content-regionmap');
     clearNode(host);
@@ -598,6 +619,45 @@
     $('override-empty').classList.toggle('hidden', state.overrides.length > 0);
     if (overridesAreStale()) { show($('stale-note')); } else { hide($('stale-note')); }
     renderMarkers();
+    renderRegionMarks();
+  }
+
+  /* A refused override marks its Region (E3); an object the satin precheck took out is
+     marked only while the Stitch plan on screen belongs to the Slice drawn (E7). */
+  function renderRegionMarks() {
+    if (!state.svg) { return; }
+    Array.prototype.forEach.call(state.svg.querySelectorAll('path.region'), function (path) {
+      path.classList.remove('refused', 'removed');
+    });
+
+    state.overrides.forEach(function (override) {
+      if (overrideInfo(override).status !== 'refused') { return; }
+      var path = regionAt(override.at_px);
+      if (path) { path.classList.add('refused'); }
+    });
+
+    var status = state.status;
+    var marks = state.svg.querySelector('g.marks');
+    if (marks) { clearNode(marks); }
+    if (!status || !status.slice || !status.stitchplan) { return; }
+    if (status.stitchplan.slice_id !== status.slice.slice_id) { return; }
+    var gone = {};
+    (status.stitchplan.removed_by_precheck || []).forEach(function (id) { gone[id] = true; });
+    Array.prototype.forEach.call(state.svg.querySelectorAll('path.region'), function (path) {
+      if (!gone[path.id]) { return; }
+      path.classList.add('removed');
+      if (marks) { marks.appendChild(dashedCopy(path)); }
+    });
+  }
+
+  /* The dashed red outline of a removed Region, drawn as its own path so the Region
+     underneath keeps a solid stroke and stays clickable. */
+  function dashedCopy(path) {
+    var copy = document.createElementNS(SVG_NS, 'path');
+    copy.setAttribute('d', path.getAttribute('d') || '');
+    var width = parseFloat(getComputedStyle(path).strokeWidth);
+    copy.setAttribute('stroke-width', (isFinite(width) ? width : 3) + 2);
+    return copy;
   }
 
   /* E8: the page's override list differs from what the last Slice was sent. */
@@ -620,11 +680,33 @@
   /* ---- clicking a Region ---- */
 
   function pointInRegion(path, at) {
+    /* Satinized Regions are stroked centrelines with no fill, so the fill test alone
+       never hits them; isPointInStroke uses the stroke-width the emitted SVG sets. */
+    var pt = new DOMPoint(at[0], at[1]);
     try {
-      return path.isPointInFill(new DOMPoint(at[0], at[1]));
+      if (path.isPointInFill(pt)) { return true; }
+    } catch (err) {
+      /* no geometry to fill: fall through to the stroke */
+    }
+    try {
+      return path.isPointInStroke(pt);
     } catch (err) {
       return false;
     }
+  }
+
+  /* The Region that holds an override, by its clicked point: refused overrides name a
+     Region no object was made for, so the point is the only handle we have (E3).
+     Locked Regions never match: they are drawn but cannot be overridden (D3).
+     Later paths paint over earlier ones, so they are asked first. */
+  function regionAt(at) {
+    if (!state.svg) { return null; }
+    var paths = state.svg.querySelectorAll('path.region');
+    for (var i = paths.length - 1; i >= 0; i--) {
+      if (LOCKED_KINDS[paths[i].getAttribute('data-kind')]) { continue; }
+      if (pointInRegion(paths[i], at)) { return paths[i]; }
+    }
+    return null;
   }
 
   /* E1: one override per Region: drop the ones whose point is inside this path. */
@@ -645,13 +727,19 @@
     if (!target || !target.closest) { return; }
     if (target.closest('g.overrides')) { return; }
 
-    var path = target.closest('path.region');
-    if (!path || !state.svg || !state.svg.getScreenCTM) { hidePopover(); return; }
+    if (!state.svg || !state.svg.getScreenCTM) { hidePopover(); return; }
     var ctm = state.svg.getScreenCTM();
     if (!ctm) { hidePopover(); return; }
 
     var point = new DOMPoint(event.clientX, event.clientY).matrixTransform(ctm.inverse());
     var at = [Math.round(point.x), Math.round(point.y)];
+    var path = target.closest('path.region');
+    if (!path) {
+      /* The click fell on a gap in a dashed Region, or between two thin ones: ask the
+         clickable Regions themselves. */
+      path = regionAt(at);
+    }
+    if (!path) { hidePopover(); return; }
     var kind = path.getAttribute('data-kind') || 'fill';
 
     if (LOCKED_KINDS[kind]) {
@@ -736,7 +824,12 @@
     var rect = event.currentTarget.getBoundingClientRect();
     var cx = event.clientX - rect.left;
     var cy = event.clientY - rect.top;
-    var next = clamp(state.view.s * Math.pow(1.0015, -event.deltaY), MIN_SCALE, MAX_SCALE);
+    /* deltaMode 0 is pixels, 1 lines (Firefox), 2 pages: same notch, other number. */
+    var delta = event.deltaY;
+    if (event.deltaMode === 1) { delta = delta * WHEEL_LINE_PX; }
+    else if (event.deltaMode === 2) { delta = delta * WHEEL_PAGE_PX; }
+    var factor = clamp(Math.pow(ZOOM_STEP, -delta), ZOOM_PER_EVENT[0], ZOOM_PER_EVENT[1]);
+    var next = clamp(state.view.s * factor, MIN_SCALE, MAX_SCALE);
     if (next === state.view.s) { return; }
     var ratio = next / state.view.s;
     state.view.x = cx - (cx - state.view.x) * ratio;
@@ -748,6 +841,9 @@
 
   function onPointerDown(event) {
     if (event.button !== 0) { return; }
+    /* Keeps Firefox from starting a native image drag under the pan. */
+    event.preventDefault();
+    suppressClick = false;                 /* decided per press, never inherited */
     drag = {
       x: event.clientX,
       y: event.clientY,
@@ -777,6 +873,10 @@
     if (!drag) { return; }
     /* Same spot down and up is a click, not a drag. */
     suppressClick = drag.overMap && drag.moved;
+    endDrag();
+  }
+
+  function endDrag() {
     drag = null;
     $('viewport-picture').classList.remove('dragging');
     $('viewport-regionmap').classList.remove('dragging');
@@ -803,11 +903,16 @@
 
     var url = state.planView === 'coverage' ? plan.coverage_url : plan.stitchplan_url;
     if (url) {
-      clearNode(image);
-      var img = document.createElement('img');
+      /* One element for the life of the page: a poll every second must not swap it. */
+      var img = image.querySelector('img');
+      if (!img) {
+        clearNode(image);
+        img = document.createElement('img');
+        img.setAttribute('draggable', 'false');
+        image.appendChild(img);
+      }
+      if (img.getAttribute('src') !== url) { img.setAttribute('src', url); }
       img.alt = state.planView === 'coverage' ? 'Coverage' : 'Stitch plan';
-      img.setAttribute('src', url);
-      image.appendChild(img);
     }
 
     addFact(numbers, 'Stitches', plan.stitches === null || plan.stitches === undefined ? '' : String(plan.stitches));
@@ -897,6 +1002,8 @@
     $('viewport-picture').addEventListener('mousedown', onPointerDown);
     window.addEventListener('mousemove', onPointerMove);
     window.addEventListener('mouseup', onPointerUp);
+    /* A mouseup that lands outside the window never reaches us: let go of the pan. */
+    window.addEventListener('blur', function () { endDrag(); });
 
     $('pop-fill').addEventListener('click', function () {
       if (state.popover && state.popover.path) { setOverride(state.popover.path, state.popover.at, 'fill'); }

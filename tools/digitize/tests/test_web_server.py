@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -43,6 +44,13 @@ case "$MODE" in
   slow) sleep 2 ;;
   boom) echo "boom" >&2; exit 3 ;;
 esac
+# sidecar: the run also writes the two files a real Slice may add (T1's regions.json
+# and vectorize's posterized preview).
+if [[ "$MODE" == "sidecar" ]]; then
+  printf '{"picture_px": [40, 30], "objects": [{"id": "f0", "kind": "fill", "color": "#ddb97f"}], "overrides": []}\n' \
+    > "output_inkstitch_svg/$BASE.regions.json"
+  printf 'not a real png\n' > "output_inkstitch_svg/${BASE}_posterized.png"
+fi
 cat > "output_inkstitch_svg/$BASE.svg" <<'SVG'
 <svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="10mm" viewBox="0 0 40 30">
 <path id="f0" d="M4 4h10v8h-10z" style="fill:#ddb97f"/>
@@ -144,19 +152,20 @@ class ServerTestCase(unittest.TestCase):
         resp = self.get(url)
         return resp, resp.get_json()
 
-    def post(self, url: str, payload=None):
-        return self.client.post(url, json=payload if payload is not None else {})
+    def post(self, url: str, payload=None, headers=None):
+        return self.client.post(url, json=payload if payload is not None else {},
+                                headers=headers or {})
 
     def status(self) -> dict:
         resp = self.get("/api/status")
         self.assertEqual(resp.status_code, 200)
         return resp.get_json()
 
-    def upload(self, name: str = "Skyfowl Patch.PNG", data: bytes = None):
+    def upload(self, name: str = "Skyfowl Patch.PNG", data: bytes = None, headers=None):
         return self.client.post("/api/picture",
                                 data={"picture": (io.BytesIO(data if data is not None
                                                              else png_bytes()), name)},
-                                content_type="multipart/form-data")
+                                content_type="multipart/form-data", headers=headers or {})
 
     def wait_state(self, want, seconds: float = 20.0) -> dict:
         """Poll /api/status until the state is one of `want`."""
@@ -205,13 +214,11 @@ class Options(ServerTestCase):
                                 "default_size_mm": 100.0, "colors": [4, 6, 8], "default_colors": 6})
 
     def test_page_or_json_error(self):
-        page = server.HERE / "static" / "index.html"
-        resp = self.get("/")
-        if page.is_file():
+        with self.client.get("/") as resp:
             self.assertEqual(resp.status_code, 200)
-        else:
-            self.assertEqual(resp.status_code, 404)
-            self.assertIn("error", resp.get_json())
+            page = resp.get_data(as_text=True)
+        self.assertIn("<html", page)
+        self.assertIn("/static/app.js", page)
 
 
 class Picture(ServerTestCase):
@@ -220,7 +227,7 @@ class Picture(ServerTestCase):
         self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
         data = resp.get_json()
         self.assertEqual(data["slug"], "Skyfowl-Patch")
-        self.assertEqual(data["url"], "/files/Skyfowl-Patch/picture.png")     # suffix lowered
+        self.assertEqual(data["url"], "/files/Skyfowl-Patch/picture.png?v=1")  # suffix lowered
         self.assertEqual((data["width"], data["height"]), (40, 30))
         self.assertEqual(data["kind"], "transparent")
         self.assertEqual(data["background_hex"], "")
@@ -228,8 +235,24 @@ class Picture(ServerTestCase):
         self.assertTrue((self.job_dir() / "picture.png").is_file())
         st = self.status()
         self.assertEqual(st["picture"], {"slug": "Skyfowl-Patch",
-                                         "url": "/files/Skyfowl-Patch/picture.png",
+                                         "url": "/files/Skyfowl-Patch/picture.png?v=1",
                                          "width": 40, "height": 30})
+
+    def test_the_picture_url_changes_with_every_picture(self):
+        """A page holding the old picture must fetch the new one: the ?v= goes up."""
+        first = self.picture_loaded()
+        self.do_slice()
+        self.wait_state({"idle", "failed"})
+        second = self.upload("Skyfowl Patch.PNG")          # same slug, new file
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.get_json()["url"], "/files/Skyfowl-Patch/picture.png?v=2")
+        self.assertEqual(self.status()["picture"]["url"], "/files/Skyfowl-Patch/picture.png?v=2")
+        self.do_slice()                                    # slice ids restart with a new picture
+        self.wait_state({"idle", "failed"})
+        third = self.upload("Skyfowl Patch.PNG")
+        self.assertEqual(third.get_json()["url"], "/files/Skyfowl-Patch/picture.png?v=3")
+        self.assertNotEqual(first["url"], third.get_json()["url"])
+        self.assertEqual(list(self.out_root.glob(".upload-*")), [])
 
     def test_bad_suffix(self):
         resp = self.upload("notes.gif", b"GIF89a")
@@ -273,6 +296,41 @@ class Picture(ServerTestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertIn("error", resp.get_json())
         self.assertTrue(link.is_symlink())
+        self.assertEqual(list(self.out_root.glob(".upload-*")), [], "no temp file left behind")
+
+    def test_a_rejected_upload_leaves_the_previous_job_alone(self):
+        """The picture is checked before anything in the job folder is touched."""
+        self.picture_loaded()
+        self.do_slice(yaml_text="profile: vadmel\n")
+        self.wait_state({"idle", "failed"})
+        jobdir = self.job_dir()
+        (jobdir / "stale.txt").write_text("from the last job")
+        before = self.status()
+
+        resp = self.upload("Skyfowl Patch.PNG", b"this is not a png")   # same name, bad bytes
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(list(self.out_root.glob(".upload-*")), [], "no temp file left behind")
+
+        self.assertTrue((jobdir / "picture.png").is_file(), "the old picture is still there")
+        self.assertTrue((jobdir / "slice.svg").is_file(), "the old Slice is still there")
+        self.assertTrue((jobdir / "job.yaml").is_file())
+        self.assertTrue((jobdir / "stale.txt").is_file(), "the folder was not made fresh")
+        self.assertEqual(yaml.safe_load((jobdir / "job.yaml").read_text()), {"profile": "vadmel"})
+        st = self.status()
+        self.assertEqual(st["picture"], before["picture"])
+        self.assertEqual(st["slice"], before["slice"])
+        self.assertEqual(st["state"], before["state"])
+
+        resp = self.do_slice()                    # the id of the failed upload is not spent
+        self.assertEqual(resp.get_json()["slice_id"], 2)
+        self.wait_state({"idle", "failed"})
+
+    def test_a_rejected_picture_names_the_uploaded_file(self):
+        resp = self.upload("broken.png", b"this is not a png")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("broken.png", resp.get_json()["error"])
+        self.assertNotIn(".upload-", resp.get_json()["error"])
+        self.assertEqual(list(self.out_root.glob(".upload-*")), [])
 
 
 class YamlCheck(ServerTestCase):
@@ -412,6 +470,69 @@ class Slice(ServerTestCase):
         self.assertIsNone(st["slice"])
         self.assertFalse((self.job_dir() / "slice.svg").exists())
 
+    def test_a_successful_slice_saves_the_config_it_ran_with(self):
+        self.picture_loaded()
+        resp = self.do_slice(yaml_text="fabric_color: '#ffffff'\n", hoop=[260, 200],
+                             size_mm=None, overrides=[{"at_px": [4, 5], "type": "satin"}])
+        self.assertEqual(resp.status_code, 202)
+        st = self.wait_state({"idle", "failed"})
+        self.assertEqual(st["state"], "idle", st["error"])
+        jobdir = self.job_dir()
+        self.assertEqual(yaml.safe_load((jobdir / "job.yaml").read_text()),
+                         {"fabric_color": "#ffffff",
+                          "stitch_overrides": [{"at_px": [4, 5], "type": "satin"}]})
+        self.assertFalse((jobdir / "job.next.yaml").exists(), "the staging name is gone")
+        self.assertIn("job.next.yaml", (jobdir / "log.txt").read_text())
+        self.assertEqual(self.app.job.hoop, (260.0, 200.0))
+        self.assertEqual(st["slice"]["hoop"], [260.0, 200.0])
+        self.assertEqual(st["slice"]["background"], "#ffffff")
+
+    def test_a_failed_slice_keeps_the_config_and_the_id_of_the_last_good_one(self):
+        self.picture_loaded()
+        self.assertEqual(self.do_slice(yaml_text="profile: vadmel\n").get_json()["slice_id"], 1)
+        self.wait_state({"idle", "failed"})
+        jobdir = self.job_dir()
+
+        self.set_mode("boom")
+        resp = self.do_slice(yaml_text="profile: lizard\n", hoop=[260, 200])
+        self.assertEqual(resp.status_code, 202)
+        self.assertEqual(resp.get_json()["slice_id"], 2, "the id it gets if it succeeds")
+        st = self.wait_state({"failed"})
+        self.assertEqual(st["state"], "failed")
+        self.assertEqual(yaml.safe_load((jobdir / "job.yaml").read_text()), {"profile": "vadmel"},
+                         "a failed Slice does not overwrite the last good config")
+        self.assertFalse((jobdir / "job.next.yaml").exists())
+        self.assertEqual(self.app.job.hoop, (120.0, 120.0), "the stored hoop is the last good one")
+
+        self.set_mode("ok")
+        self.assertEqual(self.do_slice().get_json()["slice_id"], 2,
+                         "a failed Slice does not spend its id")
+        st = self.wait_state({"idle", "failed"})
+        self.assertEqual(st["state"], "idle", st["error"])
+        self.assertEqual(st["slice"]["slice_id"], 2)
+        self.assertEqual(yaml.safe_load((jobdir / "job.yaml").read_text()), {},
+                         "this one had no yaml_text of its own")
+
+    def test_a_stale_sidecar_does_not_survive_a_slice_that_wrote_none(self):
+        self.picture_loaded()
+        self.set_mode("sidecar")
+        self.do_slice()
+        st = self.wait_state({"idle", "failed"})
+        self.assertEqual(st["state"], "idle", st["error"])
+        jobdir = self.job_dir()
+        self.assertIsNotNone(st["slice"]["regions_url"])
+        self.assertIsNotNone(st["slice"]["posterized_url"])
+        self.assertTrue((jobdir / "slice.regions.json").is_file())
+        self.assertTrue((jobdir / "slice_posterized.png").is_file())
+
+        self.set_mode("ok")                          # the next Slice writes no sidecar
+        self.do_slice()
+        st = self.wait_state({"idle", "failed"})
+        self.assertIsNone(st["slice"]["regions_url"], "the old sidecar is not offered again")
+        self.assertIsNone(st["slice"]["posterized_url"])
+        self.assertFalse((jobdir / "slice.regions.json").exists())
+        self.assertFalse((jobdir / "slice_posterized.png").exists())
+
 
 # ---- stitch plan ------------------------------------------------------------------------
 
@@ -479,6 +600,19 @@ class StitchPlan(ServerTestCase):
             if wanted:
                 self.assertIn(wanted, args, yaml_text)
 
+    def test_the_background_comes_from_the_slice_that_made_the_svg(self):
+        self.slice_first(yaml_text="fabric_color: '#123456'\n")
+        self.set_mode("boom")                      # a Slice that fails writes no config
+        self.assertEqual(self.do_slice(yaml_text="fabric_color: '#abcdef'\n").status_code, 202)
+        self.wait_state({"failed"})
+        self.set_mode("ok")
+        with self.measured():
+            self.assertEqual(self.post("/api/stitchplan").status_code, 202)
+            self.wait_state({"idle", "failed"})
+        args = (self.job_dir() / "export_args.txt").read_text()
+        self.assertIn("#123456", args)
+        self.assertNotIn("#abcdef", args)
+
     def test_no_machine_file(self):
         self.slice_first()
         self.set_mode("nope")                          # the export finishes and writes nothing
@@ -507,7 +641,35 @@ class StitchPlan(ServerTestCase):
 
 
 class OneJobAtATime(ServerTestCase):
-    def test_g4_two_slices_give_one_202_and_one_409(self):
+    def test_g4_two_slices_at_the_same_instant_give_one_202_and_one_409(self):
+        self.picture_loaded()
+        self.set_mode("slow")
+        for round_number in range(5):
+            barrier = threading.Barrier(2)
+            codes: list = []
+            lock = threading.Lock()
+
+            def hit():
+                client = self.app.test_client()        # one client per thread
+                barrier.wait(30)                      # both requests leave at the same moment
+                resp = client.post("/api/slice", json={"hoop": [120, 120], "size_mm": 100,
+                                                        "colors": 6, "key_background": False,
+                                                        "yaml_text": "", "overrides": []})
+                with lock:
+                    codes.append(resp.status_code)
+
+            threads = [threading.Thread(target=hit) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(60)
+                self.assertFalse(thread.is_alive(), "a POST never came back")
+            self.assertEqual(sorted(codes), [202, 409], round_number)
+            st = self.wait_state({"idle", "failed"})
+            self.assertEqual(st["state"], "idle", st["error"])
+        self.assertEqual(self.status()["slice"]["slice_id"], 5, "one id per Slice, none lost")
+
+    def test_two_slices_give_one_202_and_one_409(self):
         self.picture_loaded()
         self.set_mode("slow")
         first = self.do_slice()
@@ -529,6 +691,69 @@ class OneJobAtATime(ServerTestCase):
         with self.measured():
             self.assertEqual(self.do_plan().status_code, 202)
             self.wait_state({"idle", "failed"})
+
+    def test_busy_is_409_while_the_state_says_slicing_or_exporting(self):
+        """Between the process exiting and the worker's after-steps the slot is still taken."""
+        job = self.app.job
+        for state in ("slicing", "exporting"):
+            with job.lock:
+                job.state = state
+                job.proc = None
+                job.reserved = False
+            self.assertTrue(job.busy(), state)
+            with job.lock:
+                job.state = "idle"
+        self.picture_loaded()
+        self.set_mode("slow")
+        self.assertEqual(self.do_slice().status_code, 202)
+        self.assertEqual(self.do_slice().status_code, 409)
+        self.assertEqual(self.do_plan().status_code, 409)
+        self.assertEqual(self.upload().status_code, 409)
+        self.wait_state({"idle", "failed"})
+
+    def test_a_second_slice_is_409_while_the_worker_finishes_up(self):
+        """The real window: the pipeline process is gone, the job is not written up yet."""
+        self.picture_loaded()
+        self.set_mode("slow")
+        entered = threading.Event()
+        gate = threading.Event()
+        real_collect = server.core._collect
+
+        def blocked_collect(root, base, dest):
+            entered.set()
+            gate.wait(30)
+            return real_collect(root, base, dest)
+
+        with mock.patch.object(server.core, "_collect", blocked_collect):
+            self.assertEqual(self.do_slice().status_code, 202)
+            self.assertTrue(entered.wait(30), "the Slice never reached the after-steps")
+            with self.app.job.lock:
+                self.assertIsNone(self.app.job.proc, "the process is already gone")
+                self.assertEqual(self.app.job.state, "slicing")
+            try:
+                resp = self.do_slice()
+                self.assertEqual(resp.status_code, 409, resp.get_data(as_text=True))
+                self.assertEqual(resp.get_json(), {"error": "busy"})
+            finally:
+                gate.set()
+        self.assertEqual(self.wait_state({"idle", "failed"})["state"], "idle")
+
+    def test_busy_is_checked_before_the_body(self):
+        """E6 wins over a bad body: the operator gets busy, not a complaint about their JSON."""
+        self.picture_loaded()
+        self.set_mode("slow")
+        self.assertEqual(self.do_slice().status_code, 202)
+        cases = [self.post("/api/slice", {"hoop": "rubbish"}),
+                 self.post("/api/slice", {"hoop": [120, 120], "size_mm": 100, "colors": 5}),
+                 self.post("/api/slice", ["not", "an", "object"]),
+                 self.post("/api/stitchplan", {"anything": 1}),
+                 self.upload("notes.gif", b"GIF89a"),
+                 self.upload("broken.png", b"not a png"),
+                 self.client.post("/api/picture", data={}, content_type="multipart/form-data")]
+        for resp in cases:
+            self.assertEqual(resp.status_code, 409, resp.get_data(as_text=True))
+            self.assertEqual(resp.get_json(), {"error": "busy"})
+        self.wait_state({"idle", "failed"})
 
 
 class Cancel(ServerTestCase):
@@ -594,6 +819,64 @@ class Files(ServerTestCase):
             resp = self.get(url)
             self.assertEqual(resp.status_code, 404, url)
             self.assertIn("error", resp.get_json(), url)
+
+
+# ---- only this machine drives the server (Host and Origin) ---------------------------------
+
+
+class LocalRequestsOnly(ServerTestCase):
+    """A page on another site, or a name that resolves to this machine, must not drive the server."""
+
+    def test_an_origin_from_another_page_is_403(self):
+        for origin in ("http://evil.example", "https://localhost:8765", "null",
+                       "http://127.0.0.1.evil.example", "http://192.168.1.10:8765",
+                       "http://[::1]:8765", "file:///home/someone/page.html"):
+            resp = self.post("/api/yaml", {"yaml_text": ""}, headers={"Origin": origin})
+            self.assertEqual(resp.status_code, 403, origin)
+            self.assertIn("error", resp.get_json(), origin)
+            resp = self.upload(headers={"Origin": origin})
+            self.assertEqual(resp.status_code, 403, origin)
+
+    def test_a_host_that_is_not_this_machine_is_403(self):
+        for host in ("evil.example", "192.168.1.10:8765", "localhost.evil.example",
+                     "digitize-patch.attacker.test", "127.0.0.1.evil.example"):
+            for url in ("/api/status", "/", "/api/options"):
+                resp = self.client.get(url, headers={"Host": host})
+                self.assertEqual(resp.status_code, 403, "%s %s" % (host, url))
+                self.assertIn("error", resp.get_json())
+            resp = self.post("/api/yaml", {"yaml_text": ""}, headers={"Host": host})
+            self.assertEqual(resp.status_code, 403, host)
+
+    def test_this_machine_is_allowed(self):
+        with self.client.get("/") as resp:                       # Flask's default Host: localhost
+            self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.get("/api/status").status_code, 200)
+        self.assertEqual(self.post("/api/yaml", {"yaml_text": ""}).status_code, 200)
+        for host in ("localhost", "127.0.0.1", "127.0.0.1:8765", "localhost:1234", "LOCALHOST:8765"):
+            self.assertEqual(self.client.get("/api/status",
+                                             headers={"Host": host}).status_code, 200, host)
+        for origin in ("http://localhost:8765", "http://127.0.0.1:8765", "http://localhost:9999"):
+            self.assertEqual(self.post("/api/yaml", {"yaml_text": ""},
+                                       headers={"Origin": origin}).status_code, 200, origin)
+
+    def test_a_known_port_is_the_only_one_accepted(self):
+        out_root = self.root / "output" / "web2"
+        app = server.create_app(self.root, run_sh=self.run_sh, export_sh=self.export_sh,
+                                out_root=out_root, port=8765)
+        client = app.test_client()
+        good = {"Host": "localhost:8765"}
+        self.assertEqual(client.post("/api/yaml", json={"yaml_text": ""}, headers=good).status_code, 200)
+        self.assertEqual(client.get("/api/status", headers=good).status_code, 200)
+        with client.get("/", headers=good) as resp:
+            self.assertEqual(resp.status_code, 200)
+        for headers in ({"Host": "localhost:9999"}, {"Host": "127.0.0.1:80"}, {"Host": "localhost"},
+                        {"Host": "127.0.0.1:8765", "Origin": "http://localhost:9999"},
+                        {"Host": "127.0.0.1:8765", "Origin": "https://127.0.0.1:8765"}):
+            resp = client.post("/api/yaml", json={"yaml_text": ""}, headers=headers)
+            self.assertEqual(resp.status_code, 403, headers)
+        resp = client.post("/api/yaml", json={"yaml_text": ""},
+                           headers={"Host": "127.0.0.1:8765", "Origin": "http://127.0.0.1:8765"})
+        self.assertEqual(resp.status_code, 200)
 
 
 # ---- G3: bound to 127.0.0.1 only -------------------------------------------------------------

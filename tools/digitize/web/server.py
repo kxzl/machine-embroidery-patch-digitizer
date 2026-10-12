@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -31,6 +32,8 @@ DEFAULT_PORT = 8765
 LOG_TAIL = 20                            # lines kept for the page
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 PATH_ID_RE = re.compile(r'<path\b[^>]*\bid="([^"]+)"')
+HOST_RE = re.compile(r"^(127\.0\.0\.1|localhost)(?::(\d{1,5}))?$")
+RUNNING_STATES = ("slicing", "exporting")  # the job slot is held from start until the write-up
 COLOR_CHOICES = (core.COLORS_FEWER, core.COLORS_AUTO, core.COLORS_MORE)
 OVERRIDE_TYPES = ("satin", "fill")
 
@@ -45,6 +48,32 @@ def path_ids(svg_text: str) -> List[str]:
         if pid not in out:
             out.append(pid)
     return out
+
+
+def host_is_local(host: Optional[str], port: Optional[int]) -> bool:
+    """True when a Host header names this machine. Port None: any port, and no port at all.
+
+    A Host that is not one of these two names is a page that reached the server by name
+    (DNS rebinding) rather than by typing the address; it does not get to drive a job.
+    """
+    if not host:
+        return False
+    match = HOST_RE.match(host.strip().lower())
+    if match is None:
+        return False
+    if port is None:
+        return True
+    return match.group(2) is not None and int(match.group(2)) == port
+
+
+def origin_is_local(origin: Optional[str], port: Optional[int]) -> bool:
+    """True when there is no Origin, or it names this machine's page."""
+    if origin is None:
+        return True
+    rest = origin.strip().lower()
+    if not rest.startswith("http://"):
+        return False
+    return host_is_local(rest[len("http://"):], port)
 
 
 def yaml_error_text(exc: yaml.YAMLError) -> str:
@@ -80,11 +109,12 @@ def background_for(mapping: Dict[str, Any]) -> str:
     return bg
 
 
-def read_mapping(path: Path) -> Dict[str, Any]:
-    """The job YAML as a mapping; {} when it is unreadable or not a mapping."""
-    mapping, _ = parse_yaml_mapping(path.read_text(encoding="utf-8")
-                                    if path.is_file() else None)
-    return mapping or {}
+def unlink_quietly(path: Path) -> None:
+    """Delete a file if it is there; a missing file is not an error."""
+    try:
+        path.unlink()
+    except OSError:
+        pass
 
 
 def tail_file(path: Path, lines: int = 8) -> List[str]:
@@ -134,13 +164,24 @@ class Job:
         self.cancel_requested = False
         self.started_at = 0.0
         self.ended_at = 0.0
-        self.slice_id = 0                  # the id the next Slice gets
+        self.slice_id = 0                  # the id of the last Slice that worked
+        self.picture_version = 0           # the ?v= of the current picture
 
     # -- reading --------------------------------------------------------------
 
     def busy(self) -> bool:
         with self.lock:
-            return self.proc is not None or self.reserved
+            return self._busy()
+
+    def _busy(self) -> bool:
+        """The job slot is taken. Caller holds the lock.
+
+        A running state counts as busy on its own: the worker clears `proc` before it
+        moves the files and writes the status, and a request in that window must not
+        start a second job on top of it.
+        """
+        return (self.proc is not None or self.reserved
+                or self.state in RUNNING_STATES)
 
     def elapsed_s(self) -> Optional[float]:
         if not self.started_at:
@@ -166,7 +207,7 @@ class Job:
     def claimed(self):
         """The one job slot. Yields self, or None when a job already has it."""
         with self.lock:
-            if self.proc is not None or self.reserved:
+            if self._busy():
                 yield None
                 return
             self.reserved = True
@@ -305,13 +346,19 @@ def check_overrides(value: Any):
 # ---- the Flask app --------------------------------------------------------------------------
 
 
-def create_app(root, run_sh=None, export_sh=None, out_root=None) -> Flask:
-    """Build the app. Tests inject fake scripts and a temporary output folder."""
+def create_app(root, run_sh=None, export_sh=None, out_root=None, port=None) -> Flask:
+    """Build the app. Tests inject fake scripts and a temporary output folder.
+
+    `port` is the port the app serves; the Host and Origin check is as strict as it can
+    be with it, and relaxed to any port on 127.0.0.1/localhost when it is not known
+    (the Flask test client).
+    """
     root = Path(root).resolve()
     run_sh = Path(run_sh) if run_sh else root / "tools" / "digitize" / "run.sh"
     export_sh = Path(export_sh) if export_sh else root / "tools" / "digitize" / "export_svg.sh"
     out_root = Path(out_root) if out_root else root / "output" / "web"
     out_root.mkdir(parents=True, exist_ok=True)
+    serve_port = int(port) if port else None
     job = Job(root, out_root)
 
     app = Flask(__name__, static_folder=str(HERE / "static"), static_url_path="/static")
@@ -330,9 +377,20 @@ def create_app(root, run_sh=None, export_sh=None, out_root=None) -> Flask:
             return {}
         return data if isinstance(data, dict) else None
 
+    @app.before_request
+    def only_this_machine():
+        """403 unless the request came from a page on this machine at this port (G3)."""
+        if host_is_local(request.headers.get("Host"), serve_port) and \
+                origin_is_local(request.headers.get("Origin"), serve_port):
+            return None
+        return fail("This server only answers pages opened on this machine, at 127.0.0.1:%d "
+                    "or localhost:%d." % (serve_port or DEFAULT_PORT, serve_port or DEFAULT_PORT),
+                    403)
+
     # ---- finishing a Slice ---------------------------------------------------
 
-    def finish_slice(base: str, overrides: List[Dict[str, Any]], slice_id: int, jobdir: Path):
+    def finish_slice(base: str, overrides: List[Dict[str, Any]], slice_id: int, jobdir: Path,
+                     next_yaml: Path, hoop: Tuple[float, float], background: str):
         """Move the pipeline's files into the job folder, or say why nothing was kept."""
 
         def after(rc: int, lines: List[str]):
@@ -352,6 +410,9 @@ def create_app(root, run_sh=None, export_sh=None, out_root=None) -> Flask:
                     return
                 try:
                     core._collect(root, base, jobdir / "_slice")
+                    # A Slice that writes no sidecar must not leave the previous one's behind.
+                    for stale in ("slice.regions.json", "slice_posterized.png"):
+                        unlink_quietly(jobdir / stale)
                     for src, dst in ((base + ".svg", "slice.svg"),
                                      (base + "_posterized.png", "slice_posterized.png"),
                                      (base + ".regions.json", "slice.regions.json")):
@@ -365,8 +426,15 @@ def create_app(root, run_sh=None, export_sh=None, out_root=None) -> Flask:
                 if not (jobdir / "slice.svg").is_file():
                     job.done("failed", "The pipeline finished but produced no embroidery drawing.")
                     return
+                try:                                  # job.yaml only ever names a Slice that worked
+                    os.replace(str(next_yaml), str(jobdir / "job.yaml"))
+                except OSError as exc:
+                    job.done("failed", "The job settings could not be saved (%s)." % exc)
+                    return
                 shutil.rmtree(str(jobdir / "_slice"), ignore_errors=True)
                 with job.lock:
+                    job.slice_id = slice_id            # the id is spent only now
+                    job.hoop = hoop
                     job.slice = {
                         "slice_id": slice_id,
                         "svg_url": "/files/%s/slice.svg?v=%d" % (jobdir.name, slice_id),
@@ -377,16 +445,19 @@ def create_app(root, run_sh=None, export_sh=None, out_root=None) -> Flask:
                                            % (jobdir.name, slice_id)
                                            if (jobdir / "slice_posterized.png").is_file() else None),
                         "overrides": overrides,
+                        "hoop": [hoop[0], hoop[1]],
+                        "background": background,
                     }
                 job.done("idle")
             finally:
                 shutil.rmtree(str(jobdir / "_in"), ignore_errors=True)
                 core._purge(root, base)
+                unlink_quietly(next_yaml)             # gone after the rename, cleaned up otherwise
         return after
 
     # ---- finishing a Stitch plan ----------------------------------------------
 
-    def finish_plan(slice_id: int, jobdir: Path, source_svg: Path):
+    def finish_plan(slice_id: int, jobdir: Path, source_svg: Path, hoop: Tuple[float, float]):
         """Measure the exported VP3: the plan, its warnings and what the precheck removed."""
 
         def after(rc: int, lines: List[str]):
@@ -411,7 +482,7 @@ def create_app(root, run_sh=None, export_sh=None, out_root=None) -> Flask:
             except Exception as exc:                     # pystitch, or a broken file
                 job.done("failed", "The machine file could not be read (%s)." % exc)
                 return
-            warnings = core.edge_warnings(m, job.hoop)
+            warnings = core.edge_warnings(m, hoop)
             warnings += [ln for ln in lines if ln.lstrip().startswith("warning:")]
             try:
                 kept = set(path_ids((jobdir / "plan.svg").read_text(encoding="utf-8", errors="replace")))
@@ -466,36 +537,50 @@ def create_app(root, run_sh=None, export_sh=None, out_root=None) -> Flask:
             if suffix not in core.PICTURE_SUFFIXES:
                 return fail("%s files are not supported. Use a png, jpg, jpeg or webp picture."
                             % (suffix or "These"), 400)
-            slug = core.slugify(Path(upload.filename).stem)
+            # The upload is checked as a file first. Nothing in the job folder is touched
+            # until the picture is accepted, so a bad upload leaves the last job alone.
+            temp: Optional[Path] = None
             try:
-                jobdir = replace_job_dir(out_root, slug)
-            except OSError as exc:
-                return fail("The job folder could not be made: %s" % exc, 400)
-            with job.lock:                       # the folder is made fresh, so E5 drops the
-                job.slice = None                 # old Slice and Stitch plan whatever the check
-                job.stitchplan = None            # below says about the new picture
-                job.slice_id = 0
-            picture = jobdir / ("picture" + suffix)
-            upload.save(str(picture))
-            problem = core.check_picture_file(picture)
-            if problem:
-                return fail(problem, 400)
-            report = imagecheck.inspect(picture)
-            if not report.ok:
-                return fail(report.error, 400)
-            with job.lock:
-                job.dir = jobdir
-                job.image = picture
-                job.picture = {"slug": slug, "url": "/files/%s/picture%s" % (slug, suffix),
-                               "width": report.width, "height": report.height}
-                job.state = "idle"
-                job.stage = None
-                job.error = None
-                job.log_tail = []
-        return jsonify({"slug": slug, "url": "/files/%s/picture%s" % (slug, suffix),
-                        "width": report.width, "height": report.height, "kind": report.kind,
-                        "background_hex": report.background_hex,
-                        "advice": core.image_advice(report)})
+                handle, temp_name = tempfile.mkstemp(prefix=".upload-", suffix=suffix,
+                                                     dir=str(out_root))
+                os.close(handle)
+                temp = Path(temp_name)
+                upload.save(str(temp))
+                problem = core.check_picture_file(temp)
+                if problem:
+                    return fail(problem, 400)
+                report = imagecheck.inspect(temp)
+                if not report.ok:
+                    return fail(report.error.replace(temp.name, Path(upload.filename).name), 400)
+                slug = core.slugify(Path(upload.filename).stem)
+                try:
+                    jobdir = replace_job_dir(out_root, slug)
+                except OSError as exc:
+                    return fail("The job folder could not be made: %s" % exc, 400)
+                picture = jobdir / ("picture" + suffix)
+                os.replace(str(temp), str(picture))
+                temp = None
+                with job.lock:                       # the folder is made fresh, so E5 drops the
+                    job.slice = None                 # old Slice and Stitch plan whatever the check
+                    job.stitchplan = None            # below says about the new picture
+                    job.slice_id = 0
+                    job.picture_version += 1
+                    url = "/files/%s/picture%s?v=%d" % (slug, suffix, job.picture_version)
+                    job.dir = jobdir
+                    job.image = picture
+                    job.picture = {"slug": slug, "url": url,
+                                   "width": report.width, "height": report.height}
+                    job.state = "idle"
+                    job.stage = None
+                    job.error = None
+                    job.log_tail = []
+            finally:
+                if temp is not None:
+                    unlink_quietly(temp)
+            return jsonify({"slug": slug, "url": url, "width": report.width,
+                            "height": report.height, "kind": report.kind,
+                            "background_hex": report.background_hex,
+                            "advice": core.image_advice(report)})
 
     @app.post("/api/yaml")
     def api_yaml():
@@ -514,32 +599,31 @@ def create_app(root, run_sh=None, export_sh=None, out_root=None) -> Flask:
 
     @app.post("/api/slice")
     def api_slice():
-        data = body()
-        if data is None:
-            return fail("The request body must be a JSON object.", 400)
-        hoop = check_hoop(data.get("hoop"))
-        if isinstance(hoop, str):
-            return fail(hoop, 400)
-        size_mm = check_size(data.get("size_mm"))
-        if isinstance(size_mm, str):
-            return fail(size_mm, 400)
-        if data.get("colors") not in COLOR_CHOICES:
-            return fail("colors must be 4, 6 or 8.", 400)
-        overrides, complaint = check_overrides(data.get("overrides"))
-        if complaint:
-            return fail(complaint, 400)
-        mapping, complaint = parse_yaml_mapping(data.get("yaml_text"))
-        if complaint:
-            return fail(complaint, 400)
-
         with job.claimed() as slot:
             if slot is None:
                 return busy()
+            data = body()
+            if data is None:
+                return fail("The request body must be a JSON object.", 400)
+            hoop = check_hoop(data.get("hoop"))
+            if isinstance(hoop, str):
+                return fail(hoop, 400)
+            size_mm = check_size(data.get("size_mm"))
+            if isinstance(size_mm, str):
+                return fail(size_mm, 400)
+            if data.get("colors") not in COLOR_CHOICES:
+                return fail("colors must be 4, 6 or 8.", 400)
+            overrides, complaint = check_overrides(data.get("overrides"))
+            if complaint:
+                return fail(complaint, 400)
+            mapping, complaint = parse_yaml_mapping(data.get("yaml_text"))
+            if complaint:
+                return fail(complaint, 400)
+
             with job.lock:
                 if job.image is None or job.dir is None:
                     return fail("Load a picture first.", 400)
                 jobdir, image = job.dir, job.image
-                job.hoop = hoop
             spec = core.JobSpec(image=image, key_background=bool(data.get("key_background")),
                                 hoop=hoop, size_mm=size_mm, colors=data["colors"])
             settings = dict(mapping)
@@ -547,23 +631,26 @@ def create_app(root, run_sh=None, export_sh=None, out_root=None) -> Flask:
                 settings["stitch_overrides"] = overrides
             else:
                 settings.pop("stitch_overrides", None)      # G1: absent = today's behaviour
-            job_yaml = jobdir / "job.yaml"
+            # job.yaml keeps the last Slice that worked; this run reads job.next.yaml.
+            next_yaml = jobdir / "job.next.yaml"
             try:
-                job_yaml.write_text(yaml.safe_dump(settings, sort_keys=False, allow_unicode=True),
-                                    encoding="utf-8")
+                next_yaml.write_text(yaml.safe_dump(settings, sort_keys=False, allow_unicode=True),
+                                     encoding="utf-8")
                 base = core._make_base(jobdir.name)
                 staged = jobdir / "_in" / (base + image.suffix)
                 staged.parent.mkdir(exist_ok=True)
                 shutil.copyfile(str(image), str(staged))
             except OSError as exc:
                 shutil.rmtree(str(jobdir / "_in"), ignore_errors=True)
+                unlink_quietly(next_yaml)
                 return fail("The job could not be set up on disk (%s)." % exc, 400)
-            args = core.pipeline_args(spec, spec.hoop) + ["--no-export", "--config", str(job_yaml)]
+            args = core.pipeline_args(spec, spec.hoop) + ["--no-export", "--config", str(next_yaml)]
             with job.lock:
+                # The id the Slice gets if it works. A failed one does not spend it.
                 slice_id = job.slice_id + 1
-                job.slice_id = slice_id
             job.start(run_sh, list(args) + [staged], jobdir / "log.txt", "slicing",
-                      finish_slice(base, overrides, slice_id, jobdir))
+                      finish_slice(base, overrides, slice_id, jobdir, next_yaml, hoop,
+                                   background_for(settings)))
         return jsonify({"slice_id": slice_id}), 202
 
     @app.post("/api/stitchplan")
@@ -575,17 +662,19 @@ def create_app(root, run_sh=None, export_sh=None, out_root=None) -> Flask:
                 if job.slice is None or job.dir is None:
                     return fail("no Slice yet", 400)
                 jobdir, slice_id = job.dir, job.slice["slice_id"]
+                # The Slice's own values, not whatever job.yaml says now (D11).
+                hoop = tuple(job.slice.get("hoop") or job.hoop)
+                background = job.slice.get("background") or ""
             source = jobdir / "slice.svg"
             try:
                 # D11: export the exact SVG the Slice made; the precheck may edit this copy
                 shutil.copyfile(str(source), str(jobdir / "plan.svg"))
             except OSError as exc:
                 return fail("plan.svg could not be written (%s)." % exc, 400)
-            background = background_for(read_mapping(jobdir / "job.yaml"))
             args = [jobdir / "plan.svg", jobdir / "plan"] + (["--background", background]
                                                             if background else [])
             job.start(export_sh, args, jobdir / "log.txt", "exporting",
-                      finish_plan(slice_id, jobdir, source))
+                      finish_plan(slice_id, jobdir, source, hoop))
         return jsonify({"slice_id": slice_id}), 202
 
     @app.post("/api/cancel")
@@ -635,7 +724,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--port", type=int, default=DEFAULT_PORT,
                     help="port on 127.0.0.1 (default %d)" % DEFAULT_PORT)
     ns = ap.parse_args(args)
-    app = create_app(REPO_ROOT)
+    app = create_app(REPO_ROOT, port=ns.port)
     print("Digitize Patches: http://127.0.0.1:%d/  (this machine only, Ctrl-C to stop)" % ns.port)
     sys.stdout.flush()
     app.run(host="127.0.0.1", port=ns.port, threaded=True, debug=False)

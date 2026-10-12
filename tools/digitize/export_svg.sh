@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Export one Ink/Stitch SVG to a VP3 machine file, two preview PNGs and the zip Ink/Stitch made.
+# Export one Ink/Stitch SVG to a VP3 machine file and the two preview PNGs.
+#
 # Usage: tools/digitize/export_svg.sh <svg> <out_prefix> [--background HEX]
-#   --background HEX  (preview canvas colour; run.sh works it out from the config)
-# Writes <out_prefix>.svg is left alone (the satin precheck fixes it in place), plus
-# <out_prefix>.zip, <out_prefix>.err, <out_prefix>.vp3, <out_prefix>_stitchplan.png and
-# <out_prefix>_coverage.png. No timeout: Cancel stops it (qa/export.sh's timeout 1800
-# would kill a long cold export).
+#   <svg>          the Slice's SVG. The satin precheck may fix it in place.
+#   <out_prefix>   writes <out_prefix>.vp3, <out_prefix>_stitchplan.png,
+#                  <out_prefix>_coverage.png, <out_prefix>.zip and <out_prefix>.err
+#   --background HEX  preview canvas colour; run.sh works it out from the config
+#
+# It echoes the same "== ..." stage lines as run.sh, so the caller can follow along.
+# No timeout: Cancel stops it (qa/export.sh's timeout 1800 would kill a long cold export).
 set -euo pipefail
 
 SVG=""
