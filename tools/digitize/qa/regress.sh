@@ -85,6 +85,7 @@ b = sys.argv[1]
 z = zipfile.ZipFile(b + ".zip")
 open(b + ".vp3", "wb").write(z.read(z.namelist()[0]))
 PY
+  "$PY" tools/digitize/travel_vp3.py "$vp3" >"$OUT/$slug.travel.log" 2>&1
   "$PY" tools/digitize/trim_vp3.py "$vp3" 8 >"$OUT/$slug.trim.log" 2>&1
 
   read -r stitches blocks trims palette < <("$PY" - "$vp3" <<'PY'

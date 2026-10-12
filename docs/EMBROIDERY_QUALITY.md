@@ -324,6 +324,7 @@ last (`docs/USAGE.md`, `GLOSSARY.md`). What matters for quality:
 | Jump > 4 mm and exposed (not covered by a later-stitched layer) | **trim** (repo default `--trim-mm 4.0`) |
 | Jump > 8 mm | **always trim** (`tools/digitize/trim_vp3.py` pass) |
 | Jump < 2 mm | never trim (`TRIM_MIN_MM = 2.0`) |
+| Same-colour trim with a later fill/satin over the way | **run, no cut**: `tools/digitize/travel_vp3.py` (runs before `trim_vp3.py`) sews short stitches along a route under the later layer, up to 60 mm; a trim between points 2 mm apart or less is simply dropped |
 | Jump hidden under a later fill/satin (underpath) | may stay uncut; it will be covered |
 | Within one satin (cross stitches, fan) | never trim — satin cross stitches are legitimately up to ~8 mm |
 
@@ -351,7 +352,10 @@ reference is not a model for jump hygiene. Our file has no exposed move > 8 mm.
 cutting, and our 461 trims each add ~10 lock stitches (~0.5–1.5 mm each;
 measured in the pre-fix hotspot analysis behind `docs/adr/0003`). If trim count
 becomes a problem, reduce trims only where the jump is provably covered by a
-later layer.
+later layer. `travel_vp3.py` does this: it rasterises the thread sewn after each
+same-colour trim, routes the needle through the cover and sews a run instead of
+a cut. The trim stays when no covered route exists (see `docs/USAGE.md`, Travel
+under).
 
 ---
 

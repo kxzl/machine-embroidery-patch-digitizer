@@ -67,6 +67,27 @@ fill average. Caused by underlay, tie locks and ladder fills packed into tiny
 or thin components; the operator sees thread bunching and needle stress.
 _Avoid_: Dense area, clump
 
+**Fill region**:
+One connected area of a single Thread colour stitched as one fill or satin
+element.
+_Avoid_: Patch (the finished item), object, island, blob
+
+**Trim**:
+A thread cut between two Fill regions. Costs the machine a cut, a thread tail and
+lock stitches, and is a chance for a thread break.
+_Avoid_: Jump (VP3 has no jump command), cut
+
+**Travel run**:
+Short running stitches that carry the needle between two Fill regions of one
+Thread colour under Cover, so no Trim is needed.
+_Avoid_: Underpath (Ink/Stitch: travel inside one fill), hidden jump
+
+**Cover**:
+Dense stitching sewn after a Travel run, in a thread not lighter than the run's,
+that hides it. Earlier stitching of the same Thread colour counts only when the
+operator opts in.
+_Avoid_: Overlay, topping
+
 **Stitch plan**:
 A rendered image of a machine file showing every needle penetration in thread
 colour, used to check a file without sewing it.

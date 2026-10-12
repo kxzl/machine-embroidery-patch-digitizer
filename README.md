@@ -33,7 +33,7 @@ For every picture the pipeline writes:
 - **Satin outlines.** Thin runs of the darkest colour are skeletonized into satin columns whose width follows the line. Anything thinner than Ink/Stitch's 1.0 mm satin minimum is widened or dropped, so it is not silently sewn as a running stitch.
 - **Satin border.** A transparent background is treated as a patch. The pipeline finds or adds a satin border and draws it last.
 - **Seam compensation.** Fills grow 0.6 mm under the layers stitched after them, so a small shift in the fabric does not open a gap. A fabric profile (`--profile vadmel`) sets density, underlay and pull compensation for thick wool.
-- **Trims.** A long or exposed jump gets a trim. Jumps under 2 mm are left alone.
+- **Trims and travel.** A long or exposed jump gets a trim. Jumps under 2 mm are left alone. Where the next object has the same colour and later stitching will cover the way, the needle runs there under that stitching and the thread is not cut. A trim between points 2 mm apart or less is dropped.
 - **Layered SVG input.** An Inkscape SVG with named layers goes through a separate path that keeps the artist's stitch order.
 
 ## Sewn results
@@ -120,6 +120,7 @@ flowchart LR
 4. **Outlines to satin.** Thin runs of the outline colour are skeletonized into centre lines and emitted as satin columns.
 5. **Order and trim.** Layers keep their light-to-dark order. Inside a layer the objects are swept nearest-first from the needle position left by the previous layer. Long or exposed jumps get trims.
 6. **Export.** The SVG carries the Ink/Stitch parameters for each object and is converted to VP3 headlessly, using a small `wx` stand-in so no GUI toolkit is needed.
+7. **Travel under.** In the VP3, each trim between two objects of one colour becomes a running stitch hidden under later fills, satin or the border, when such a route exists.
 
 ## Status and limits
 
@@ -139,6 +140,7 @@ tools/
     svg_digitize.py  layered SVG path
     skeleton.py      centre lines for satin outlines
     satinize.py      turn thin shapes into satin columns
+    travel_vp3.py    turn same-colour trims into runs under later stitching
     trim_vp3.py      add trims to long jumps in the VP3
     preview.py       draw a VP3 as a stitch plan
     key_background.py  turn a flat background into transparency
